@@ -208,8 +208,28 @@ function getActiveTypeOverride(opponentName) {
   return teraType || tempType || null;
 }
 
+function getRevealedMoves(opponentName) {
+  const history = document.querySelector('.battle-history, .message-log');
+  if (!history) return [];
+  
+  const revealedMoves = new Set();
+  const escapedName = opponentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const moveRegex = new RegExp(`The opposing ${escapedName} used (.*)!`, 'i');
+  
+  const lines = history.innerText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  
+  for (const line of lines) {
+    const match = line.match(moveRegex);
+    if (match) {
+      revealedMoves.add(match[1]);
+    }
+  }
+  
+  return Array.from(revealedMoves);
+}
+
 function getOpponentTypes() {
-  if (!window.Pokedex) return { name: "Unknown", types: [] };
+  if (!window.Pokedex) return { name: "Unknown", types: [], revealedMoves: [] };
   const statbars = document.querySelectorAll('.statbar');
   let opponentName = null;
   
@@ -233,31 +253,49 @@ function getOpponentTypes() {
     }
   }
 
-  if (opponentName) {
-    const override = getActiveTypeOverride(opponentName);
-    if (override) {
-      return { name: opponentName, types: override, isOverride: true };
-    }
+  let finalTypes = [];
+  let isOverride = false;
+  let revealedMoves = [];
 
-    const types = window.Pokedex[opponentName];
-    if (types) return { name: opponentName, types: types };
+  if (opponentName) {
+    revealedMoves = getRevealedMoves(opponentName);
+    const override = getActiveTypeOverride(opponentName);
     
-    // Normalize if exact match fails
-    const normalized = opponentName.replace(/[^a-zA-Z0-9-]/g, '');
-    for (const key in window.Pokedex) {
-      if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
-        return { name: key, types: window.Pokedex[key] };
+    if (override) {
+      finalTypes = override;
+      isOverride = true;
+    } else {
+      const types = window.Pokedex[opponentName];
+      if (types) {
+        finalTypes = types;
+      } else {
+        // Normalize if exact match fails
+        const normalized = opponentName.replace(/[^a-zA-Z0-9-]/g, '');
+        for (const key in window.Pokedex) {
+          if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
+            finalTypes = window.Pokedex[key];
+            opponentName = key;
+            break;
+          }
+        }
       }
     }
   }
-  return { name: opponentName || "Unknown", types: [] };
+  
+  return { 
+    name: opponentName || "Unknown", 
+    types: finalTypes, 
+    isOverride: isOverride,
+    revealedMoves: revealedMoves
+  };
 }
 
 function getBestMove(buttons) {
   const oppData = getOpponentTypes();
   const oppTypes = oppData.types;
+  const revealedMovesText = oppData.revealedMoves.length > 0 ? ` (Revealed Moves: ${oppData.revealedMoves.join(', ')})` : '';
   
-  log(`--- Evaluating moves against ${oppData.name} (Types: ${oppTypes.join('/') || 'Unknown'}) ---`);
+  log(`--- Evaluating moves against ${oppData.name} (Types: ${oppTypes.join('/') || 'Unknown'})${revealedMovesText} ---`);
   
   let bestButtons = [];
   let bestScore = -1;
