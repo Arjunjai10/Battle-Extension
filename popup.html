@@ -4,87 +4,183 @@
   <meta charset="utf-8" />
   <title>Showdown Test Bot</title>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700;900&display=swap');
+
     body {
-      font-family: 'Inter', system-ui, -apple-system, sans-serif;
-      width: 280px;
-      padding: 16px;
       margin: 0;
+      padding: 0;
+      width: 340px;
+    }
+    
+    .container {
+      font-family: 'Space Grotesk', system-ui, sans-serif;
+      padding: 24px;
       background-color: #ffffff;
-      color: #111111;
+      background-image: radial-gradient(#c0c0c0 2px, transparent 2px);
+      background-size: 16px 16px;
+      background-position: 0 0;
+      color: #000000;
+      box-sizing: border-box;
+      border: 4px solid #000000;
+      overflow: hidden;
     }
+
     h1 {
-      font-size: 18px;
-      font-weight: 700;
-      margin: 0 0 12px 0;
-      letter-spacing: -0.02em;
+      font-size: 22px;
+      font-weight: 900;
+      text-transform: uppercase;
+      margin: 0 0 20px 0;
+      letter-spacing: -0.5px;
+      background: #000;
+      color: #fff;
+      display: inline-block;
+      padding: 6px 12px;
+      transform: rotate(-2deg);
+      box-shadow: 4px 4px 0px rgba(0,0,0,0.2);
+      border: 2px solid #000;
     }
+    
     .warning {
-      font-size: 12px;
-      color: #333333;
-      background: #f5f5f5;
-      border-left: 3px solid #111111;
-      padding: 10px 12px;
-      border-radius: 0 6px 6px 0;
-      margin-bottom: 16px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #000;
+      background: #fff;
+      border: 3px solid #000;
+      box-shadow: 5px 5px 0px #000;
+      padding: 12px;
+      margin-bottom: 24px;
       line-height: 1.5;
     }
-    label {
+    
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+    
+    .toggle-label {
       display: flex;
       align-items: center;
-      gap: 10px;
-      font-size: 14px;
-      font-weight: 500;
-      margin-bottom: 16px;
+      gap: 14px;
+      font-size: 16px;
+      font-weight: 900;
+      margin-bottom: 24px;
       cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      user-select: none;
+      background: #fff;
+      padding: 12px;
+      border: 3px solid #000;
+      box-shadow: 5px 5px 0px #000;
+      transition: transform 0.1s, box-shadow 0.1s;
     }
-    input[type="checkbox"] {
-      accent-color: #111111;
-      width: 16px;
-      height: 16px;
-      cursor: pointer;
+    
+    .toggle-label:active {
+      box-shadow: 0px 0px 0px #000;
+      transform: translate(5px, 5px);
     }
+    
+    .custom-checkbox {
+      position: relative;
+      width: 24px;
+      height: 24px;
+      border: 3px solid #000;
+      background: #fff;
+      box-sizing: border-box;
+    }
+    
+    .custom-checkbox::after {
+      content: "";
+      position: absolute;
+      display: none;
+      top: 1px;
+      left: 5px;
+      width: 6px;
+      height: 10px;
+      border: solid #fff;
+      border-width: 0 3px 3px 0;
+      transform: rotate(45deg);
+    }
+    
+    input[type="checkbox"]:checked + .custom-checkbox {
+      background: #000;
+    }
+    
+    input[type="checkbox"]:checked + .custom-checkbox::after {
+      display: block;
+    }
+    
     button {
       width: 100%;
-      padding: 10px;
-      margin-bottom: 8px;
-      font-size: 13px;
-      font-weight: 600;
-      color: #ffffff;
-      background-color: #111111;
-      border: 1px solid #111111;
-      border-radius: 6px;
+      padding: 14px;
+      margin-bottom: 16px;
+      font-size: 15px;
+      font-weight: 900;
+      text-transform: uppercase;
+      color: #000;
+      background-color: #fff;
+      border: 3px solid #000;
+      box-shadow: 5px 5px 0px #000;
       cursor: pointer;
-      transition: all 0.2s ease;
+      transition: all 0.1s ease;
+      letter-spacing: 1px;
+      font-family: inherit;
     }
+    
     button:last-of-type {
       margin-bottom: 0;
     }
+    
     button:hover {
-      background-color: #ffffff;
-      color: #111111;
+      background-color: #000;
+      color: #fff;
     }
+    
+    button:active {
+      box-shadow: 0px 0px 0px #000;
+      transform: translate(5px, 5px);
+    }
+    
     #status {
-      font-size: 12px;
-      color: #666666;
-      margin-top: 12px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #000;
+      margin-top: 24px;
       text-align: center;
-      min-height: 15px;
+      text-transform: uppercase;
+      background: #fff;
+      border: 2px solid #000;
+      padding: 8px;
+      box-shadow: 3px 3px 0px #000;
+    }
+    
+    #status:empty {
+      display: none;
     }
   </style>
 </head>
 <body>
-  <h1>Showdown Test Bot</h1>
-  <div class="warning">
-    For your own unrated / room-match battles only. Turn off before
-    laddering or any ranked play.
+  <div class="container">
+    <h1>Test Bot</h1>
+    <div class="warning">
+      Unrated / Room Battles Only. <br> Disable Before Laddering.
+    </div>
+    <label class="toggle-label">
+      <input type="checkbox" id="enabledToggle" class="sr-only" />
+      <div class="custom-checkbox"></div>
+      Auto-Play
+    </label>
+    <button id="exportBtn">Export Bug Log</button>
+    <button id="clearBtn">Clear Log</button>
+    <div id="status"></div>
   </div>
-  <label>
-    <input type="checkbox" id="enabledToggle" />
-    Auto-play enabled
-  </label>
-  <button id="exportBtn">Export bug log</button>
-  <button id="clearBtn">Clear log</button>
-  <div id="status"></div>
   <script src="popup.js"></script>
 </body>
 </html>
