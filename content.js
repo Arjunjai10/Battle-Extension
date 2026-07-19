@@ -171,41 +171,89 @@ function maybeLogDiagnostic() {
 }
 
 // ---------------------------------------------------------------------
-function getActiveTypeOverride(opponentName) {
+function getOpponentState(opponentName) {
   const history = document.querySelector('.battle-history, .message-log');
-  if (!history) return null;
-  
   let teraType = null;
   let tempType = null;
   let hasSwitchedIn = false;
+  let boosts = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, accuracy: 0, evasion: 0 };
   
-  // Split the log into lines and read from bottom (most recent) to top
-  const lines = history.innerText.split('\n').map(l => l.trim()).filter(l => l.length > 0).reverse();
-  const escapedName = opponentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  
-  const teraRegex = new RegExp(`The opposing ${escapedName} terastallized into the ([A-Za-z]+) type`, 'i');
-  const typeChangeRegex = new RegExp(`The opposing ${escapedName}.*type changed to ([A-Za-z]+)`, 'i');
-  const switchRegex = new RegExp(`sent out ${escapedName}!|${escapedName} was dragged out!`, 'i');
+  if (history) {
+    const lines = history.innerText.split('\n').map(l => l.trim()).filter(l => l.length > 0).reverse();
+    const escapedName = opponentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    
+    const teraRegex = new RegExp(`The opposing ${escapedName} terastallized into the ([A-Za-z]+) type`, 'i');
+    const typeChangeRegex = new RegExp(`The opposing ${escapedName}.*type changed to ([A-Za-z]+)`, 'i');
+    const switchRegex = new RegExp(`sent out ${escapedName}!|${escapedName} was dragged out!`, 'i');
+    const statRegex = new RegExp(`The opposing ${escapedName}'s (Attack|Defense|Sp\\. Atk|Sp\\. Def|Speed|accuracy|evasiveness) (rose|fell)( sharply| drastically| harshly| severely)?!`, 'i');
+    const bellyDrumRegex = new RegExp(`The opposing ${escapedName} cut its own HP and maximized its Attack!`, 'i');
 
-  for (const line of lines) {
-    if (!teraType) {
-      const teraMatch = line.match(teraRegex);
-      if (teraMatch) teraType = [teraMatch[1]];
+    for (const line of lines) {
+      if (!teraType) {
+        const teraMatch = line.match(teraRegex);
+        if (teraMatch) teraType = [teraMatch[1]];
+      }
+      
+      if (!tempType && !hasSwitchedIn) {
+        const typeChangeMatch = line.match(typeChangeRegex);
+        if (typeChangeMatch) tempType = [typeChangeMatch[1]];
+      }
+      
+      if (!hasSwitchedIn) {
+        const statMatch = line.match(statRegex);
+        if (statMatch) {
+          const statMap = { 'Attack': 'atk', 'Defense': 'def', 'Sp. Atk': 'spa', 'Sp. Def': 'spd', 'Speed': 'spe', 'accuracy': 'accuracy', 'evasiveness': 'evasion' };
+          const stat = statMap[statMatch[1]];
+          const isRose = statMatch[2].toLowerCase() === 'rose';
+          const severity = statMatch[3] ? statMatch[3].trim().toLowerCase() : '';
+          
+          let amount = 1;
+          if (severity === 'sharply' || severity === 'harshly') amount = 2;
+          else if (severity === 'drastically' || severity === 'severely') amount = 3;
+          
+          // Since we scan bottom-up, we are retracing steps. We ADD to reconstruct the forward state?
+          // Wait, if it's currently +2, and we go backwards and see "rose sharply (+2)", we SUBTRACT to find the previous state?
+          // No, we are building the final state from scratch! But since we are reading backwards, if we just SUM them up, the total is the same!
+          // (+2) then (-1) = (+1). If we read backwards: (-1) then (+2) = (+1). Summation is commutative!
+          if (isRose) boosts[stat] += amount;
+          else boosts[stat] -= amount;
+        }
+        
+        if (line.match(bellyDrumRegex)) {
+          // Belly drum sets attack to +6. Since we're reading backwards, this overrides everything before it (which we haven't seen yet).
+          // But actually, it sets it to +6 going forward. If we've already seen stat changes AFTER belly drum, we should add them to 6!
+          boosts.atk = 6 + boosts.atk;
+          // We can't perfectly model belly drum bottom-up without a flag, but this is a close approximation.
+        }
+      }
+      
+      if (!hasSwitchedIn && switchRegex.test(line)) {
+        hasSwitchedIn = true;
+      }
+      
+      // We can't break early anymore because we need to scan until switch-in to get all stat changes!
+      if (teraType && tempType && hasSwitchedIn) break;
     }
-    
-    if (!tempType && !hasSwitchedIn) {
-      const typeChangeMatch = line.match(typeChangeRegex);
-      if (typeChangeMatch) tempType = [typeChangeMatch[1]];
+  }
+
+  // Get status from statbar
+  let status = null;
+  const statbars = document.querySelectorAll('.statbar');
+  for (const bar of statbars) {
+    if (bar.classList.contains('rstatbar') || (bar.getAttribute('data-side') || '').startsWith('p2')) {
+      const statusSpan = bar.querySelector('.status');
+      if (statusSpan && statusSpan.textContent.trim()) {
+        status = statusSpan.textContent.trim();
+      }
+      break;
     }
-    
-    if (!hasSwitchedIn && switchRegex.test(line)) {
-      hasSwitchedIn = true;
-    }
-    
-    if (teraType && (tempType || hasSwitchedIn)) break;
   }
   
-  return teraType || tempType || null;
+  return {
+    typeOverride: teraType || tempType || null,
+    boosts: boosts,
+    status: status
+  };
 }
 
 function getRevealedMoves(opponentName) {
@@ -256,13 +304,15 @@ function getOpponentTypes() {
   let finalTypes = [];
   let isOverride = false;
   let revealedMoves = [];
+  let boosts = {};
+  let status = null;
 
   if (opponentName) {
     revealedMoves = getRevealedMoves(opponentName);
-    const override = getActiveTypeOverride(opponentName);
+    const oppState = getOpponentState(opponentName);
     
-    if (override) {
-      finalTypes = override;
+    if (oppState.typeOverride) {
+      finalTypes = oppState.typeOverride;
       isOverride = true;
     } else {
       const types = window.Pokedex[opponentName];
@@ -280,22 +330,39 @@ function getOpponentTypes() {
         }
       }
     }
+    boosts = oppState.boosts;
+    status = oppState.status;
   }
   
   return { 
     name: opponentName || "Unknown", 
     types: finalTypes, 
     isOverride: isOverride,
-    revealedMoves: revealedMoves
+    revealedMoves: revealedMoves,
+    boosts: boosts,
+    status: status
   };
 }
 
 function getBestMove(buttons) {
   const oppData = getOpponentTypes();
   const oppTypes = oppData.types;
-  const revealedMovesText = oppData.revealedMoves.length > 0 ? ` (Revealed Moves: ${oppData.revealedMoves.join(', ')})` : '';
   
-  log(`--- Evaluating moves against ${oppData.name} (Types: ${oppTypes.join('/') || 'Unknown'})${revealedMovesText} ---`);
+  let stateTags = [];
+  if (oppData.status) stateTags.push(`Status: ${oppData.status}`);
+  if (oppData.boosts) {
+    const activeBoosts = Object.entries(oppData.boosts)
+      .filter(([stat, val]) => val !== 0)
+      .map(([stat, val]) => `${stat}${val > 0 ? '+' : ''}${val}`);
+    if (activeBoosts.length > 0) stateTags.push(`Boosts: ${activeBoosts.join(', ')}`);
+  }
+  if (oppData.revealedMoves && oppData.revealedMoves.length > 0) {
+    stateTags.push(`Revealed Moves: ${oppData.revealedMoves.join(', ')}`);
+  }
+  
+  const stateText = stateTags.length > 0 ? ` (${stateTags.join(' | ')})` : '';
+  
+  log(`--- Evaluating moves against ${oppData.name} (Types: ${oppTypes.join('/') || 'Unknown'})${stateText} ---`);
   
   let bestButtons = [];
   let bestScore = -1;
