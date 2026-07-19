@@ -176,6 +176,7 @@ function getOpponentState(opponentName) {
   let teraType = null;
   let tempType = null;
   let hasSwitchedIn = false;
+  let bellyDrumSeen = false;
   let boosts = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, accuracy: 0, evasion: 0 };
   
   if (history) {
@@ -212,13 +213,18 @@ function getOpponentState(opponentName) {
             if (severity === 'sharply' || severity === 'harshly') amount = 2;
             else if (severity === 'drastically' || severity === 'severely') amount = 3;
             
-            if (isRose) boosts[stat] += amount;
-            else boosts[stat] -= amount;
+            if (stat === 'atk' && bellyDrumSeen) {
+              // Ignore attack changes chronologically before Belly Drum
+            } else {
+              if (isRose) boosts[stat] += amount;
+              else boosts[stat] -= amount;
+            }
           }
         }
         
-        if (line.match(bellyDrumRegex)) {
+        if (line.match(bellyDrumRegex) && !bellyDrumSeen) {
           boosts.atk = 6 + boosts.atk;
+          bellyDrumSeen = true;
         }
       }
       
