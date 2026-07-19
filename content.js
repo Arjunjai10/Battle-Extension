@@ -44,15 +44,41 @@ let lastActedSignature = null;
 let lastFoundAnyAt = Date.now();
 let lastDiagnosticAt = 0;
 
+let logQueue = [];
+let isLogging = false;
+
+function processLogQueue() {
+  if (isLogging || logQueue.length === 0) return;
+  isLogging = true;
+  
+  const entries = [...logQueue];
+  logQueue = [];
+  
+  try {
+    chrome.storage.local.get({ bugLog: [] }, (data) => {
+      if (chrome.runtime.lastError) {
+        isLogging = false;
+        return;
+      }
+      const bugLog = data.bugLog;
+      bugLog.push(...entries);
+      while (bugLog.length > 500) bugLog.shift();
+      chrome.storage.local.set({ bugLog }, () => {
+        isLogging = false;
+        if (logQueue.length > 0) processLogQueue();
+      });
+    });
+  } catch (err) {
+    console.error("[ShowdownTestBot] Could not save log:", err.message);
+    isLogging = false;
+  }
+}
+
 function log(message) {
   const entry = { time: new Date().toISOString(), message };
   console.log("[ShowdownTestBot]", message);
-  chrome.storage.local.get({ bugLog: [] }, (data) => {
-    const bugLog = data.bugLog;
-    bugLog.push(entry);
-    while (bugLog.length > 500) bugLog.shift();
-    chrome.storage.local.set({ bugLog });
-  });
+  logQueue.push(entry);
+  processLogQueue();
 }
 
 function queryFirstMatching(selectorList) {
@@ -146,7 +172,7 @@ function maybeLogDiagnostic() {
 
 // ---------------------------------------------------------------------
 function getOpponentTypes() {
-  if (!window.Pokedex) return [];
+  if (!window.Pokedex) return { name: "Unknown", types: [] };
   const statbars = document.querySelectorAll('.statbar');
   let opponentName = null;
   
@@ -172,21 +198,25 @@ function getOpponentTypes() {
 
   if (opponentName) {
     const types = window.Pokedex[opponentName];
-    if (types) return types;
+    if (types) return { name: opponentName, types: types };
     
     // Normalize if exact match fails
     const normalized = opponentName.replace(/[^a-zA-Z0-9-]/g, '');
     for (const key in window.Pokedex) {
       if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
-        return window.Pokedex[key];
+        return { name: key, types: window.Pokedex[key] };
       }
     }
   }
-  return [];
+  return { name: opponentName || "Unknown", types: [] };
 }
 
 function getBestMove(buttons) {
-  const oppTypes = getOpponentTypes();
+  const oppData = getOpponentTypes();
+  const oppTypes = oppData.types;
+  
+  log(`--- Evaluating moves against ${oppData.name} (Types: ${oppTypes.join('/') || 'Unknown'}) ---`);
+  
   let bestButtons = [];
   let bestScore = -1;
 
