@@ -202,28 +202,23 @@ function getOpponentState(opponentName) {
       if (!hasSwitchedIn) {
         const statMatch = line.match(statRegex);
         if (statMatch) {
-          const statMap = { 'Attack': 'atk', 'Defense': 'def', 'Sp. Atk': 'spa', 'Sp. Def': 'spd', 'Speed': 'spe', 'accuracy': 'accuracy', 'evasiveness': 'evasion' };
-          const stat = statMap[statMatch[1]];
-          const isRose = statMatch[2].toLowerCase() === 'rose';
-          const severity = statMatch[3] ? statMatch[3].trim().toLowerCase() : '';
-          
-          let amount = 1;
-          if (severity === 'sharply' || severity === 'harshly') amount = 2;
-          else if (severity === 'drastically' || severity === 'severely') amount = 3;
-          
-          // Since we scan bottom-up, we are retracing steps. We ADD to reconstruct the forward state?
-          // Wait, if it's currently +2, and we go backwards and see "rose sharply (+2)", we SUBTRACT to find the previous state?
-          // No, we are building the final state from scratch! But since we are reading backwards, if we just SUM them up, the total is the same!
-          // (+2) then (-1) = (+1). If we read backwards: (-1) then (+2) = (+1). Summation is commutative!
-          if (isRose) boosts[stat] += amount;
-          else boosts[stat] -= amount;
+          const statMap = { 'attack': 'atk', 'defense': 'def', 'sp. atk': 'spa', 'sp. def': 'spd', 'speed': 'spe', 'accuracy': 'accuracy', 'evasiveness': 'evasion' };
+          const stat = statMap[statMatch[1].toLowerCase()];
+          if (stat) {
+            const isRose = statMatch[2].toLowerCase() === 'rose';
+            const severity = statMatch[3] ? statMatch[3].trim().toLowerCase() : '';
+            
+            let amount = 1;
+            if (severity === 'sharply' || severity === 'harshly') amount = 2;
+            else if (severity === 'drastically' || severity === 'severely') amount = 3;
+            
+            if (isRose) boosts[stat] += amount;
+            else boosts[stat] -= amount;
+          }
         }
         
         if (line.match(bellyDrumRegex)) {
-          // Belly drum sets attack to +6. Since we're reading backwards, this overrides everything before it (which we haven't seen yet).
-          // But actually, it sets it to +6 going forward. If we've already seen stat changes AFTER belly drum, we should add them to 6!
           boosts.atk = 6 + boosts.atk;
-          // We can't perfectly model belly drum bottom-up without a flag, but this is a close approximation.
         }
       }
       
@@ -231,9 +226,13 @@ function getOpponentState(opponentName) {
         hasSwitchedIn = true;
       }
       
-      // We can't break early anymore because we need to scan until switch-in to get all stat changes!
       if (teraType && tempType && hasSwitchedIn) break;
     }
+  }
+
+  // Clamp boosts to valid ranges
+  for (let key in boosts) {
+    boosts[key] = Math.max(-6, Math.min(6, boosts[key]));
   }
 
   // Get status from statbar
