@@ -232,8 +232,14 @@ function evaluateAndAct() {
 
     if (allButtons.length === 0) {
       lastActedSignature = null;
-      setBadge("Showdown Test Bot: ON — waiting for your turn", "#f0ad4e");
-      maybeLogDiagnostic();
+      
+      // Check if we are at the end of a battle or in a replay
+      if (document.querySelector('button[name="closeAndMainMenu"], button[name="goToEnd"], .replayDownloadButton')) {
+        setBadge("Showdown Test Bot: ON — Battle Over / Replay", "#5bc0de");
+      } else {
+        setBadge("Showdown Test Bot: ON — waiting for your turn", "#f0ad4e");
+        maybeLogDiagnostic();
+      }
       return;
     }
 
