@@ -69,7 +69,7 @@ function processLogQueue() {
       });
     });
   } catch (err) {
-    console.error("[ShowdownTestBot] Could not save log:", err.message);
+    console.log("[ShowdownTestBot] Could not save log (context invalidated).");
     isLogging = false;
   }
 }
