@@ -118,6 +118,11 @@ function maybeLogDiagnostic() {
   if (now - lastFoundAnyAt < STUCK_THRESHOLD_MS) return;
   if (now - lastDiagnosticAt < STUCK_THRESHOLD_MS) return; // don't spam
   lastDiagnosticAt = now;
+  
+  // Don't log if the battle is over or we are in a replay
+  if (document.querySelector('button[name="closeAndMainMenu"], button[name="goToEnd"], .replayDownloadButton')) {
+    return;
+  }
 
   const candidates = document.querySelectorAll(
     '.controls, .battle-controls, [class*="control"]'
@@ -137,6 +142,71 @@ function maybeLogDiagnostic() {
     "DIAGNOSTIC: enabled but no recognized move/switch/teampreview " +
       "button matched for 10+ seconds. Nearby controls markup:\n" + snippet
   );
+}
+
+// ---------------------------------------------------------------------
+function getOpponentTypes() {
+  if (!window.Pokedex) return [];
+  const statbars = document.querySelectorAll('.statbar');
+  let opponentName = null;
+  
+  for (const bar of statbars) {
+    if (bar.classList.contains('rstatbar') || (bar.getAttribute('data-side') || '').startsWith('p2')) {
+      const strong = bar.querySelector('strong');
+      if (strong) opponentName = strong.textContent.trim();
+    }
+  }
+  
+  if (!opponentName) {
+    const strong = document.querySelector('.statbar strong');
+    if (strong) opponentName = strong.textContent.trim();
+  }
+
+  if (opponentName) {
+    const types = window.Pokedex[opponentName];
+    if (types) return types;
+    
+    const normalized = opponentName.replace(/[^a-zA-Z0-9-]/g, '');
+    for (const key in window.Pokedex) {
+      if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
+        return window.Pokedex[key];
+      }
+    }
+  }
+  return [];
+}
+
+function getBestMove(buttons) {
+  const oppTypes = getOpponentTypes();
+  let bestButtons = [];
+  let bestScore = -1;
+
+  for (const btn of buttons) {
+    let moveType = null;
+    const typeEl = btn.querySelector('.type');
+    if (typeEl) {
+      moveType = typeEl.textContent.trim();
+    } else {
+      const match = btn.className.match(/type-([a-zA-Z]+)/);
+      if (match) moveType = match[1];
+    }
+
+    let score = 1;
+    if (moveType && oppTypes.length > 0 && window.getEffectiveness) {
+      score = window.getEffectiveness(moveType, oppTypes);
+    }
+    
+    log(`Evaluated move ${btn.textContent.replace(/\s+/g, ' ').trim()} (Type: ${moveType}) -> Score: ${score}`);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestButtons = [btn];
+    } else if (score === bestScore) {
+      bestButtons.push(btn);
+    }
+  }
+
+  return randomChoice(bestButtons);
 }
 
 // ---------------------------------------------------------------------
@@ -179,7 +249,7 @@ function evaluateAndAct() {
     let category = "";
 
     if (move.buttons.length > 0) {
-      chosen = randomChoice(move.buttons);
+      chosen = getBestMove(move.buttons);
       category = `move (via ${move.selectorUsed})`;
     } else if (switches.buttons.length > 0) {
       chosen = randomChoice(switches.buttons);
