@@ -151,21 +151,30 @@ function getOpponentTypes() {
   let opponentName = null;
   
   for (const bar of statbars) {
+    // Look for opponent statbar
     if (bar.classList.contains('rstatbar') || (bar.getAttribute('data-side') || '').startsWith('p2')) {
       const strong = bar.querySelector('strong');
-      if (strong) opponentName = strong.textContent.trim();
+      if (strong) {
+        let rawName = strong.textContent.trim();
+        // Remove level (e.g. L78) and gender symbols
+        opponentName = rawName.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
+      }
     }
   }
   
   if (!opponentName) {
     const strong = document.querySelector('.statbar strong');
-    if (strong) opponentName = strong.textContent.trim();
+    if (strong) {
+      let rawName = strong.textContent.trim();
+      opponentName = rawName.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
+    }
   }
 
   if (opponentName) {
     const types = window.Pokedex[opponentName];
     if (types) return types;
     
+    // Normalize if exact match fails
     const normalized = opponentName.replace(/[^a-zA-Z0-9-]/g, '');
     for (const key in window.Pokedex) {
       if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
