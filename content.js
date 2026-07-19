@@ -171,6 +171,43 @@ function maybeLogDiagnostic() {
 }
 
 // ---------------------------------------------------------------------
+function getActiveTypeOverride(opponentName) {
+  const history = document.querySelector('.battle-history, .message-log');
+  if (!history) return null;
+  
+  let teraType = null;
+  let tempType = null;
+  let hasSwitchedIn = false;
+  
+  // Split the log into lines and read from bottom (most recent) to top
+  const lines = history.innerText.split('\n').map(l => l.trim()).filter(l => l.length > 0).reverse();
+  const escapedName = opponentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  
+  const teraRegex = new RegExp(`The opposing ${escapedName} terastallized into the ([A-Za-z]+) type`, 'i');
+  const typeChangeRegex = new RegExp(`The opposing ${escapedName}.*type changed to ([A-Za-z]+)`, 'i');
+  const switchRegex = new RegExp(`sent out ${escapedName}!|${escapedName} was dragged out!`, 'i');
+
+  for (const line of lines) {
+    if (!teraType) {
+      const teraMatch = line.match(teraRegex);
+      if (teraMatch) teraType = [teraMatch[1]];
+    }
+    
+    if (!tempType && !hasSwitchedIn) {
+      const typeChangeMatch = line.match(typeChangeRegex);
+      if (typeChangeMatch) tempType = [typeChangeMatch[1]];
+    }
+    
+    if (!hasSwitchedIn && switchRegex.test(line)) {
+      hasSwitchedIn = true;
+    }
+    
+    if (teraType && (tempType || hasSwitchedIn)) break;
+  }
+  
+  return teraType || tempType || null;
+}
+
 function getOpponentTypes() {
   if (!window.Pokedex) return { name: "Unknown", types: [] };
   const statbars = document.querySelectorAll('.statbar');
@@ -197,6 +234,11 @@ function getOpponentTypes() {
   }
 
   if (opponentName) {
+    const override = getActiveTypeOverride(opponentName);
+    if (override) {
+      return { name: opponentName, types: override, isOverride: true };
+    }
+
     const types = window.Pokedex[opponentName];
     if (types) return { name: opponentName, types: types };
     
