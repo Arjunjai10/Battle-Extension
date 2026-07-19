@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Showdown Battle Test Bot",
+  "version": "0.1.0",
+  "description": "Automates simple move/switch choices in your own unrated Pokemon Showdown battles, for learning and bug testing only.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://play.pokemonshowdown.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://play.pokemonshowdown.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Showdown Test Bot"
+  }
+}
