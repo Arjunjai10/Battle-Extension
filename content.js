@@ -26,6 +26,11 @@ const SELECTOR_SETS = {
     'button[name="chooseMove"]:not([disabled])',
     ".movemenu button:not(.disabled)",
   ],
+  target: [
+    'button[name="chooseMoveTarget"]:not([disabled])',
+    'button[name="chooseTarget"]:not([disabled])',
+    ".targetmenu button:not([disabled])"
+  ],
   switch: [
     'button[name="chooseSwitch"]:not([disabled])',
     ".switchmenu button:not(.disabled)",
@@ -409,6 +414,8 @@ function getBestAction(moveButtons, switchButtons) {
   const oppData = getOpponentTypes();
   const oppTypes = oppData.types;
   
+  log(`Opponent State: ${oppData.name} - Types: ${oppTypes.join('/')}, Boosts: atk=${oppData.boosts.atk || 0} spa=${oppData.boosts.spa || 0}, Moves: ${oppData.revealedMoves.join(', ') || 'None'}`);
+
   let stateTags = [];
   if (oppData.status) stateTags.push(`Status: ${oppData.status}`);
   if (oppData.boosts) {
@@ -427,7 +434,7 @@ function getBestAction(moveButtons, switchButtons) {
   const dangerScore = getDangerScore(myData.types, oppData);
   log(`Active Matchup: ${myData.name} takes max ${dangerScore}x damage from opponent STABs.`);
 
-  let bestMoveBtn = null;
+  let bestMoveBtns = [];
   let bestMoveScore = -1;
   let bestMoveLog = "";
 
@@ -449,51 +456,60 @@ function getBestAction(moveButtons, switchButtons) {
     
     if (score > bestMoveScore) {
       bestMoveScore = score;
-      bestMoveBtn = btn;
-      bestMoveLog = `Evaluated move ${btn.textContent.replace(/\s+/g, ' ').trim()} (Type: ${moveType}) -> Score: ${score}`;
+      bestMoveBtns = [btn];
+      bestMoveLog = `Evaluated moves, best score: ${score} (e.g. Type: ${moveType})`;
+    } else if (score === bestMoveScore) {
+      bestMoveBtns.push(btn);
     }
   }
+  
+  let bestMoveBtn = bestMoveBtns.length > 0 ? randomChoice(bestMoveBtns) : null;
 
-  let bestSwitchBtn = null;
+  let bestSwitchBtns = [];
   let bestSwitchDamage = 999;
   
   // If we are forced to switch (no move buttons) or in high danger (dangerScore >= 2)
   if (moveButtons.length === 0 || dangerScore >= 2) {
+    log(`Danger score ${dangerScore.toFixed(1)}, moves=${moveButtons.length}. Evaluating switches...`);
+    // Pre-compute all known Pokedex names to find matches in button text
+    const allNames = window.Pokedex ? Object.keys(window.Pokedex).sort((a, b) => b.length - a.length) : [];
+    
     for (const btn of switchButtons) {
-      // Don't switch if button is disabled (e.g. fainted or active)
       if (btn.disabled || btn.classList.contains('disabled')) continue;
       
-      const pkmnName = btn.textContent.trim().replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
-      let types = window.Pokedex[pkmnName];
-      if (!types) {
-        const normalized = pkmnName.replace(/[^a-zA-Z0-9-]/g, '');
-        for (const key in window.Pokedex) {
-          if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
-            types = window.Pokedex[key];
-            break;
-          }
+      let pkmnName = btn.textContent.trim();
+      for (const name of allNames) {
+        if (pkmnName.includes(name)) {
+          pkmnName = name;
+          break;
         }
       }
       
+      const pkmnTypes = window.Pokedex ? (window.Pokedex[pkmnName] || []) : [];
+      
       let incomingDamage = 1;
-      if (types && oppTypes.length > 0) {
+      if (pkmnTypes.length > 0 && oppTypes.length > 0) {
         incomingDamage = 0;
         for (const oppType of oppTypes) {
-          const mult = window.getEffectiveness(oppType, types);
+          const mult = window.getEffectiveness(oppType, pkmnTypes);
           if (mult > incomingDamage) incomingDamage = mult;
         }
       }
       
       if (incomingDamage < bestSwitchDamage) {
         bestSwitchDamage = incomingDamage;
-        bestSwitchBtn = btn;
+        bestSwitchBtns = [btn];
+      } else if (incomingDamage === bestSwitchDamage) {
+        bestSwitchBtns.push(btn);
       }
     }
   }
+  
+  let bestSwitchBtn = bestSwitchBtns.length > 0 ? randomChoice(bestSwitchBtns) : null;
 
   // Decision Logic
   if (moveButtons.length === 0 && bestSwitchBtn) {
-    log(`Must switch. Chose defensively best option (Takes ${bestSwitchDamage}x from STAB).`);
+    log(`Must switch (no moves). Chose defensively best option (Takes ${bestSwitchDamage}x from STAB).`);
     return { btn: bestSwitchBtn, type: 'switch' };
   }
   
@@ -503,11 +519,16 @@ function getBestAction(moveButtons, switchButtons) {
     log(`DANGER AVERTED: Retreating! Best switch takes ${bestSwitchDamage}x vs active taking ${dangerScore}x.`);
     return { btn: bestSwitchBtn, type: 'switch' };
   }
-
+  
   if (bestMoveBtn) {
-    if (dangerScore >= 2) log(`DANGER ACCEPTED: No good switch options. Staying in!`);
+    if (dangerScore >= 2) log(`DANGER WARNING: Staying in! Danger Score = ${dangerScore.toFixed(1)}. Trying to strike.`);
     return { btn: bestMoveBtn, type: 'move' };
   }
+  
+  // Absolute fallback if everything fails
+  if (moveButtons.length > 0) return { btn: moveButtons[0], type: 'move' };
+  if (switchButtons.length > 0) return { btn: switchButtons[0], type: 'switch' };
+
   
   return { btn: switchButtons[0], type: 'switch' }; // Fallback
 }
@@ -524,11 +545,13 @@ function evaluateAndAct() {
 
   try {
     const move = queryFirstMatching(SELECTOR_SETS.move);
+    const target = queryFirstMatching(SELECTOR_SETS.target);
     const switches = queryFirstMatching(SELECTOR_SETS.switch);
     const teamPreview = queryFirstMatching(SELECTOR_SETS.teamPreview);
 
     const allButtons = [
       ...move.buttons,
+      ...target.buttons,
       ...switches.buttons,
       ...teamPreview.buttons,
     ];
@@ -557,7 +580,11 @@ function evaluateAndAct() {
     let chosen = null;
     let category = "";
 
-    if (move.buttons.length > 0 || switches.buttons.length > 0) {
+    if (target.buttons.length > 0) {
+      // Pick a random target to ensure we don't only hit one player in FFA
+      chosen = randomChoice(target.buttons);
+      category = 'target';
+    } else if (move.buttons.length > 0 || switches.buttons.length > 0) {
       const action = getBestAction(move.buttons, switches.buttons);
       chosen = action.btn;
       category = action.type;
