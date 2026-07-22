@@ -44,6 +44,59 @@ const SELECTOR_SETS = {
 const ACTION_DELAY_MS = [300, 900];
 const STUCK_THRESHOLD_MS = 10000;
 
+// --- Injected script to fetch data from main world ---
+let cachedMoveData = {};
+let cachedOppData = {};
+
+const dataFetcher = document.createElement('script');
+dataFetcher.textContent = `
+  window.addEventListener('message', (event) => {
+    if (event.source !== window || !event.data || event.data.direction !== 'from-extension') return;
+    
+    if (event.data.type === 'FETCH_MOVES') {
+      let result = {};
+      const dex = window.Dex || window.BattleDex;
+      for (const move of event.data.moves) {
+        if (dex && dex.moves) {
+          result[move] = dex.moves.get(move);
+        } else if (window.BattleMovedex) {
+          result[move] = window.BattleMovedex[move.toLowerCase().replace(/[^a-z0-9]/g, '')];
+        }
+      }
+      window.postMessage({ direction: 'from-page', type: 'MOVES_RESULT', result: result }, '*');
+    }
+    
+    if (event.data.type === 'FETCH_OPPONENTS') {
+       let result = {};
+       const dex = window.Dex || window.BattleDex;
+       for (const name of event.data.opponents) {
+         if (dex && dex.species) {
+           result[name] = dex.species.get(name);
+         } else if (window.BattlePokedex) {
+           result[name] = window.BattlePokedex[name.toLowerCase().replace(/[^a-z0-9]/g, '')];
+         }
+       }
+       window.postMessage({ direction: 'from-page', type: 'OPP_RESULT', result: result }, '*');
+    }
+  });
+`;
+document.documentElement.appendChild(dataFetcher);
+dataFetcher.remove();
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window || !event.data || event.data.direction !== 'from-page') return;
+  if (event.data.type === 'MOVES_RESULT') {
+    for (const [m, data] of Object.entries(event.data.result)) {
+       cachedMoveData[m] = data || { basePower: 0, category: 'Status' };
+    }
+  }
+  if (event.data.type === 'OPP_RESULT') {
+    for (const [name, data] of Object.entries(event.data.result)) {
+       cachedOppData[name] = data || { baseStats: { def: 100, spd: 100 } };
+    }
+  }
+});
+
 let enabled = false;
 let lastActedSignature = null;
 let lastFoundAnyAt = Date.now();
@@ -395,6 +448,23 @@ function getBestAction(moveButtons, switchButtons) {
   const myData = getMyActiveTypes();
   const opponents = getOpponents();
   
+  // Ask for opponent data if we don't have it
+  const missingOpps = opponents.map(o => o.name).filter(n => n && !cachedOppData[n]);
+  if (missingOpps.length > 0) {
+    window.postMessage({ direction: 'from-extension', type: 'FETCH_OPPONENTS', opponents: missingOpps }, '*');
+  }
+
+  // Ask for move data if we don't have it
+  const missingMoves = moveButtons.map(btn => btn.getAttribute('data-move')).filter(m => m && !cachedMoveData[m]);
+  if (missingMoves.length > 0) {
+    window.postMessage({ direction: 'from-extension', type: 'FETCH_MOVES', moves: missingMoves }, '*');
+  }
+
+  if (missingOpps.length > 0 || missingMoves.length > 0) {
+    log("Waiting for game data to load from page...");
+    return null;
+  }
+  
   let maxDangerScore = 0;
   for (const opp of opponents) {
     if (opp.status === 'FNT' || opp.status === 'fnt') continue;
@@ -435,15 +505,37 @@ function getBestAction(moveButtons, switchButtons) {
       if (match) moveType = match[1];
     }
 
+    const moveName = btn.getAttribute('data-move');
+    const moveData = cachedMoveData[moveName] || { basePower: 60, category: 'Physical' };
+    let bp = moveData.basePower || 0;
+    let category = moveData.category || 'Status';
+    
+    // Penalize status moves unless no attacks are available
+    if (category === 'Status') {
+        bp = 5;
+    } else if (bp === 0) { // OHKO or variable BP moves
+        bp = 60; 
+    }
+
     let bestScoreForThisMove = -1;
     let targetForThisMove = null;
     
     for (const opp of opponents) {
         if (opp.status === 'FNT' || opp.status === 'fnt') continue;
         
-        let score = 1;
+        let score = bp;
+        
+        // "spa def moves": adjust score based on defense vs sp.def
+        const oppStats = (cachedOppData[opp.name] && cachedOppData[opp.name].baseStats) || { def: 100, spd: 100 };
+        if (category === 'Physical') {
+            score *= (100 / Math.max(10, oppStats.def));
+        } else if (category === 'Special') {
+            score *= (100 / Math.max(10, oppStats.spd));
+        }
+        
         if (moveType && opp.types.length > 0 && window.getEffectiveness) {
-          score = window.getEffectiveness(moveType, opp.types);
+          const mult = window.getEffectiveness(moveType, opp.types);
+          score *= mult;
           if (myData.types.includes(moveType)) score *= 1.5; // STAB
         }
         if (score > bestScoreForThisMove) {
@@ -594,6 +686,7 @@ function evaluateAndAct() {
       category = 'target';
     } else if (move.buttons.length > 0 || switches.buttons.length > 0) {
       const action = getBestAction(move.buttons, switches.buttons);
+      if (!action) return;
       chosen = action.btn;
       category = action.type;
     } else if (teamPreview.buttons.length > 0) {
@@ -612,6 +705,16 @@ function evaluateAndAct() {
       Math.random() * (ACTION_DELAY_MS[1] - ACTION_DELAY_MS[0]);
     setTimeout(() => {
       try {
+        if (category === 'move') {
+          const modifiers = ['terastallize', 'megaevo', 'zmove', 'dynamax', 'ultra'];
+          for (const mod of modifiers) {
+            const cb = document.querySelector(`input[name="${mod}"]`);
+            if (cb && !cb.checked) {
+              cb.click();
+              log(`Activated ${mod}!`);
+            }
+          }
+        }
         chosen.click();
         setBadge(`Showdown Test Bot: clicked "${label}"`, "#5cb85c");
       } catch (err) {
