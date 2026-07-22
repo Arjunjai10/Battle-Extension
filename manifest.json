@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Showdown Battle Test Bot",
+  "name": "Showdown Battle Bot",
   "version": "0.1.0",
   "description": "Automates simple move/switch choices in your own unrated Pokemon Showdown battles, for learning and bug testing only.",
   "icons": {
@@ -8,24 +8,38 @@
     "48": "icon.png",
     "128": "icon.png"
   },
-  "permissions": ["storage"],
-  "host_permissions": ["https://play.pokemonshowdown.com/*"],
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://play.pokemonshowdown.com/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://play.pokemonshowdown.com/*"],
-      "js": ["pokedex.js", "typechart.js", "content.js"],
+      "matches": [
+        "https://play.pokemonshowdown.com/*"
+      ],
+      "js": [
+        "pokedex.js",
+        "typechart.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://play.pokemonshowdown.com/*"],
-      "js": ["injected.js"],
+      "matches": [
+        "https://play.pokemonshowdown.com/*"
+      ],
+      "js": [
+        "injected.js"
+      ],
       "run_at": "document_idle",
       "world": "MAIN"
     }
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Showdown Test Bot",
+    "default_title": "Showdown Bot",
     "default_icon": "icon.png"
   }
 }
