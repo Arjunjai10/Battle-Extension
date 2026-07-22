@@ -171,7 +171,7 @@ function maybeLogDiagnostic() {
   lastDiagnosticAt = now;
   
   // Don't log if the battle is over or we are in a replay
-  if (document.querySelector('button[name="closeAndMainMenu"], button[name="goToEnd"], .replayDownloadButton')) {
+  if (document.querySelector('button[name="closeAndMainMenu"], button[name="goToEnd"], button[name="instantReplay"], .replayDownloadButton')) {
     return;
   }
 
@@ -500,18 +500,28 @@ function getBestAction(moveButtons, switchButtons) {
   let oppToWorryAbout = null;
   let oppSpeed = 100;
   
-  for (const opp of opponents) {
-    if (opp.status === 'FNT' || opp.status === 'fnt') continue;
-    
-    let oppData = cachedOppData[opp.name] || {};
-    let dangerScore = getDangerScore(myData.types, myBaseStats, opp, oppData);
-    if (dangerScore > maxDangerScore) {
-      maxDangerScore = dangerScore;
-      oppToWorryAbout = opp;
-      let oppBaseSpe = (oppData.baseStats && oppData.baseStats.spe) || 100;
-      oppSpeed = estimateStat(oppBaseSpe, false, opp.boosts.spe);
-      if (opp.status === 'PAR') oppSpeed /= 2;
+  if (opponents && opponents.length > 0) {
+    for (const opp of opponents) {
+      if (opp.status === 'FNT' || opp.status === 'fnt') continue;
+      
+      let oppData = cachedOppData[opp.name] || {};
+      let dangerScore = getDangerScore(myData.types, myBaseStats, opp, oppData);
+      if (dangerScore > maxDangerScore) {
+        maxDangerScore = dangerScore;
+        oppToWorryAbout = opp;
+        let oppBaseSpe = (oppData.baseStats && oppData.baseStats.spe) || 100;
+        oppSpeed = estimateStat(oppBaseSpe, false, opp.boosts.spe);
+        if (opp.status === 'PAR') oppSpeed /= 2;
+      }
     }
+  }
+  
+  let opp = oppToWorryAbout || (opponents && opponents.length > 0 ? opponents[0] : null);
+  if (!opp) {
+    log("No opponents found (FFA or weird state). Falling back to random action.");
+    if (moveButtons.length > 0) return { btn: moveButtons[Math.floor(Math.random() * moveButtons.length)], type: 'move' };
+    if (switchButtons.length > 0) return { btn: switchButtons[Math.floor(Math.random() * switchButtons.length)], type: 'switch' };
+    return null;
   }
   
   let amISlower = myStats.spe < oppSpeed;
@@ -731,7 +741,7 @@ function evaluateAndAct() {
       lastActedSignature = null;
       
       // Check if we are at the end of a battle or in a replay
-      if (document.querySelector('button[name="closeAndMainMenu"], button[name="goToEnd"], .replayDownloadButton')) {
+      if (document.querySelector('button[name="closeAndMainMenu"], button[name="goToEnd"], button[name="instantReplay"], .replayDownloadButton')) {
         setBadge("Showdown Test Bot: ON — Battle Over / Replay", "#5bc0de");
       } else {
         setBadge("Showdown Test Bot: ON — waiting for your turn", "#f0ad4e");
