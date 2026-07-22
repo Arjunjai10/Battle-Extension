@@ -15,17 +15,17 @@
       "matches": ["https://play.pokemonshowdown.com/*"],
       "js": ["pokedex.js", "typechart.js", "content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://play.pokemonshowdown.com/*"],
+      "js": ["injected.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
     }
   ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "Showdown Test Bot",
     "default_icon": "icon.png"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["injected.js"],
-      "matches": ["https://play.pokemonshowdown.com/*"]
-    }
-  ]
+  }
 }

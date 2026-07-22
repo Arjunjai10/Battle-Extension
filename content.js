@@ -48,13 +48,6 @@ const STUCK_THRESHOLD_MS = 10000;
 let cachedMoveData = {};
 let cachedOppData = {};
 
-const dataFetcher = document.createElement('script');
-dataFetcher.src = chrome.runtime.getURL('injected.js');
-dataFetcher.onload = function() {
-  this.remove();
-};
-(document.head || document.documentElement).appendChild(dataFetcher);
-
 window.addEventListener('message', (event) => {
   if (event.source !== window || !event.data || event.data.direction !== 'from-page') return;
   if (event.data.type === 'MOVES_RESULT') {
