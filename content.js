@@ -718,7 +718,26 @@ function getBestAction(moveButtons, switchButtons) {
 // Main decision loop
 // ---------------------------------------------------------------------
 
+let pollInterval = null;
+
+function killBot() {
+  if (observer) observer.disconnect();
+  if (pollInterval) clearInterval(pollInterval);
+  let badge = document.getElementById("showdown-test-bot-badge");
+  if (badge) badge.remove();
+}
+
 function evaluateAndAct() {
+  try {
+    if (!chrome.runtime || !chrome.runtime.id) {
+      killBot();
+      return;
+    }
+  } catch (e) {
+    killBot();
+    return;
+  }
+
   if (!enabled) {
     setBadge("Showdown Test Bot: OFF", "#888");
     return;
@@ -831,7 +850,7 @@ function scheduleEvaluate() {
 
 const observer = new MutationObserver(() => scheduleEvaluate());
 observer.observe(document.body, { childList: true, subtree: true });
-setInterval(evaluateAndAct, 1000);
+pollInterval = setInterval(evaluateAndAct, 1000);
 
 chrome.storage.local.get({ enabled: false }, (data) => {
   enabled = data.enabled;
