@@ -426,6 +426,7 @@ function getDangerScore(myTypes, myStats, oppState, oppData) {
   if (oppState.status === 'SLP' || oppState.status === 'FRZ') return 0;
   
   let maxDamage = 0;
+  let mostDangerousType = 'Normal';
   let oppBase = oppData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
   
   let oppEstStats = {
@@ -439,15 +440,24 @@ function getDangerScore(myTypes, myStats, oppState, oppData) {
   };
 
   // Estimate max damage opponent can do assuming they have a STAB move of their type with 90 BP
+  // AND check coverage moves of all types at 80 BP
+  const allTypes = ['Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison', 'Ground', 'Flying', 'Psychic', 'Bug', 'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy'];
   const oppTypes = oppState.types && oppState.types.length > 0 ? oppState.types : ['Normal'];
-  for (const oppType of oppTypes) {
-    // Check both physical and special 90 BP moves
+  
+  for (const testType of allTypes) {
+    let isStab = oppTypes.includes(testType);
+    let bp = isStab ? 90 : 80;
+    let stabMultiplier = isStab ? 1.5 : 1.0;
+    
     for (const cat of ['Physical', 'Special']) {
-      const effect = window.getEffectiveness ? window.getEffectiveness(oppType, myTypes) : 1;
+      const effect = window.getEffectiveness ? window.getEffectiveness(testType, myTypes) : 1;
       let atk = cat === 'Physical' ? oppEstStats.atk : oppEstStats.spa;
       let def = cat === 'Physical' ? myEstStats.def : myEstStats.spd;
-      let dmg = ((((42 * atk * 90) / def) / 50) + 2) * 1.5 * effect;
-      if (dmg > maxDamage) maxDamage = dmg;
+      let dmg = ((((42 * atk * bp) / def) / 50) + 2) * stabMultiplier * effect;
+      if (dmg > maxDamage) {
+          maxDamage = dmg;
+          mostDangerousType = testType;
+      }
     }
   }
   
@@ -455,7 +465,7 @@ function getDangerScore(myTypes, myStats, oppState, oppData) {
   let myHp = estimateStat(myStats.hp, true, 0);
   let percentDamage = maxDamage / myHp;
   
-  return percentDamage; // e.g., 0.5 means 50% health, >1 means OHKO
+  return { score: percentDamage, expectedType: mostDangerousType };
 }
 
 function getBestAction(moveButtons, switchButtons) {
@@ -564,16 +574,16 @@ function getBestAction(moveButtons, switchButtons) {
                    moveScore = 0; // Don't use if already statused
                }
            }
-           else if (['Swords Dance', 'Dragon Dance', 'Nasty Plot', 'Calm Mind'].includes(moveName)) {
-               if (maxDangerScore < 0.4) {
+           else if (['Swords Dance', 'Dragon Dance', 'Nasty Plot', 'Calm Mind', 'Quiver Dance', 'Bulk Up'].includes(moveName)) {
+               if (maxDangerScore < 0.35) {
                    moveScore = 200; // Very high value if safe to setup
                } else {
-                   moveScore = 10; // Unsafe to setup
+                   moveScore = 5; // Unsafe to setup
                }
            }
            else if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis'].includes(moveName)) {
                // If taking moderate damage but we can heal it off
-               if (maxDangerScore < 0.6) {
+               if (maxDangerScore > 0.4 && maxDangerScore < 0.6) {
                    moveScore = 180;
                } else {
                    moveScore = 5;
@@ -600,6 +610,15 @@ function getBestAction(moveButtons, switchButtons) {
            // If we are slower and will get OHKO'd, priority is our only hope
            if (amISlower && maxDangerScore >= 1.0 && moveData.priority > 0) {
                moveScore += 300;
+           }
+           
+           // Momentum moves
+           if (['U-turn', 'Volt Switch', 'Flip Turn'].includes(moveName)) {
+               if (maxDangerScore > 0.8 && !amISlower) {
+                   moveScore += 250; // Pivot out quickly before we get hit
+               } else if (maxDangerScore < 0.5) {
+                   moveScore += 40; // Good for maintaining momentum
+               }
            }
            
            // Accuracy penalty
@@ -643,7 +662,7 @@ function getBestAction(moveButtons, switchButtons) {
   const historyText = (document.querySelector('.battle-history, .message-log') || {}).innerText || "";
   let hazardsUp = historyText.includes('pointed stones') || historyText.includes('Spikes');
   
-  if (moveButtons.length === 0 || maxDangerScore >= 1.0) { // If about to be OHKO'd
+  if (moveButtons.length === 0 || (maxDangerScore >= 1.0 && amISlower)) { // If about to be OHKO'd before we can move
     log(`Danger score ${Math.round(maxDangerScore*100)}%, moves=${moveButtons.length}. Evaluating switches...`);
     const allNames = window.Pokedex ? Object.keys(window.Pokedex).sort((a, b) => b.length - a.length) : [];
     
