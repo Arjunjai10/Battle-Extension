@@ -49,50 +49,24 @@ let cachedMoveData = {};
 let cachedOppData = {};
 
 const dataFetcher = document.createElement('script');
-dataFetcher.textContent = `
-  window.addEventListener('message', (event) => {
-    if (event.source !== window || !event.data || event.data.direction !== 'from-extension') return;
-    
-    if (event.data.type === 'FETCH_MOVES') {
-      let result = {};
-      const dex = window.Dex || window.BattleDex;
-      for (const move of event.data.moves) {
-        if (dex && dex.moves) {
-          result[move] = dex.moves.get(move);
-        } else if (window.BattleMovedex) {
-          result[move] = window.BattleMovedex[move.toLowerCase().replace(/[^a-z0-9]/g, '')];
-        }
-      }
-      window.postMessage({ direction: 'from-page', type: 'MOVES_RESULT', result: result }, '*');
-    }
-    
-    if (event.data.type === 'FETCH_OPPONENTS') {
-       let result = {};
-       const dex = window.Dex || window.BattleDex;
-       for (const name of event.data.opponents) {
-         if (dex && dex.species) {
-           result[name] = dex.species.get(name);
-         } else if (window.BattlePokedex) {
-           result[name] = window.BattlePokedex[name.toLowerCase().replace(/[^a-z0-9]/g, '')];
-         }
-       }
-       window.postMessage({ direction: 'from-page', type: 'OPP_RESULT', result: result }, '*');
-    }
-  });
-`;
-document.documentElement.appendChild(dataFetcher);
-dataFetcher.remove();
+dataFetcher.src = chrome.runtime.getURL('injected.js');
+dataFetcher.onload = function() {
+  this.remove();
+};
+(document.head || document.documentElement).appendChild(dataFetcher);
 
 window.addEventListener('message', (event) => {
   if (event.source !== window || !event.data || event.data.direction !== 'from-page') return;
   if (event.data.type === 'MOVES_RESULT') {
     for (const [m, data] of Object.entries(event.data.result)) {
-       cachedMoveData[m] = data || { basePower: 0, category: 'Status' };
+       cachedMoveData[m] = data || { basePower: 0, category: 'Status', type: 'Normal', priority: 0, accuracy: 100 };
     }
   }
   if (event.data.type === 'OPP_RESULT') {
     for (const [name, data] of Object.entries(event.data.result)) {
-       cachedOppData[name] = data || { baseStats: { def: 100, spd: 100 } };
+       let obj = data || { baseStats: { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 100 } };
+       if (!obj.baseStats) obj.baseStats = { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 100 };
+       cachedOppData[name] = obj;
     }
   }
 });
@@ -426,22 +400,69 @@ function getOpponents() {
   return opponents;
 }
 
-function getDangerScore(myTypes, oppState) {
+function estimateStat(baseStat, isHp = false, boosts = 0) {
+  // Assume Level 100, 84 EVs, neutral nature for a rough estimate
+  let stat = isHp ? (baseStat * 2 + 100 + 10 + 42) : (baseStat * 2 + 5 + 21);
+  if (boosts > 0) stat *= (2 + boosts) / 2;
+  if (boosts < 0) stat *= 2 / (2 - boosts);
+  return stat;
+}
+
+function calculateEstimatedDamage(attackerStats, defenderStats, move, attackerTypes, defenderTypes) {
+  let bp = move.basePower || 0;
+  if (bp === 0) return 0;
+  
+  let atk = move.category === 'Physical' ? attackerStats.atk : attackerStats.spa;
+  let def = move.category === 'Physical' ? defenderStats.def : defenderStats.spd;
+  
+  // Level 100 formula
+  let damage = ((((42 * atk * bp) / def) / 50) + 2);
+  
+  // STAB
+  let stab = attackerTypes.includes(move.type) ? 1.5 : 1;
+  damage *= stab;
+  
+  // Effectiveness
+  let effect = window.getEffectiveness ? window.getEffectiveness(move.type, defenderTypes) : 1;
+  damage *= effect;
+  
+  return damage; // Raw HP estimate
+}
+
+function getDangerScore(myTypes, myStats, oppState, oppData) {
   if (oppState.status === 'SLP' || oppState.status === 'FRZ') return 0;
   
-  let maxMultiplier = 1; // Default to neutral if we don't know
-  if (oppState.types && oppState.types.length > 0) {
-    maxMultiplier = 0;
-    for (const oppType of oppState.types) {
-      const mult = window.getEffectiveness(oppType, myTypes);
-      if (mult > maxMultiplier) maxMultiplier = mult;
+  let maxDamage = 0;
+  let oppBase = oppData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
+  
+  let oppEstStats = {
+    atk: estimateStat(oppBase.atk, false, oppState.boosts.atk),
+    spa: estimateStat(oppBase.spa, false, oppState.boosts.spa),
+  };
+  
+  let myEstStats = {
+    def: estimateStat(myStats.def, false, 0), // Ignoring our boosts for now for danger score simplicity
+    spd: estimateStat(myStats.spd, false, 0),
+  };
+
+  // Estimate max damage opponent can do assuming they have a STAB move of their type with 90 BP
+  const oppTypes = oppState.types && oppState.types.length > 0 ? oppState.types : ['Normal'];
+  for (const oppType of oppTypes) {
+    // Check both physical and special 90 BP moves
+    for (const cat of ['Physical', 'Special']) {
+      const effect = window.getEffectiveness ? window.getEffectiveness(oppType, myTypes) : 1;
+      let atk = cat === 'Physical' ? oppEstStats.atk : oppEstStats.spa;
+      let def = cat === 'Physical' ? myEstStats.def : myEstStats.spd;
+      let dmg = ((((42 * atk * 90) / def) / 50) + 2) * 1.5 * effect;
+      if (dmg > maxDamage) maxDamage = dmg;
     }
   }
   
-  const maxBoost = Math.max(0, oppState.boosts.atk, oppState.boosts.spa);
-  const boostMultiplier = 1 + (maxBoost * 0.5);
+  // Convert damage to a % of our estimated HP
+  let myHp = estimateStat(myStats.hp, true, 0);
+  let percentDamage = maxDamage / myHp;
   
-  return maxMultiplier * boostMultiplier;
+  return percentDamage; // e.g., 0.5 means 50% health, >1 means OHKO
 }
 
 function getBestAction(moveButtons, switchButtons) {
@@ -460,35 +481,48 @@ function getBestAction(moveButtons, switchButtons) {
     window.postMessage({ direction: 'from-extension', type: 'FETCH_MOVES', moves: missingMoves }, '*');
   }
 
-  if (missingOpps.length > 0 || missingMoves.length > 0) {
+  // Get our base stats
+  let myBaseStats = {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
+  if (cachedOppData[myData.name]) { // We can use the opponent cache to cache our own base stats too since it queries pokedex
+      myBaseStats = cachedOppData[myData.name].baseStats || myBaseStats;
+  } else if (!cachedOppData[myData.name]) {
+      window.postMessage({ direction: 'from-extension', type: 'FETCH_OPPONENTS', opponents: [myData.name] }, '*');
+  }
+
+  if (missingOpps.length > 0 || missingMoves.length > 0 || !cachedOppData[myData.name]) {
     log("Waiting for game data to load from page...");
-    return null;
+    return null; // wait
   }
   
-  let maxDangerScore = 0;
+  let myStats = {
+    hp: estimateStat(myBaseStats.hp, true, 0),
+    atk: estimateStat(myBaseStats.atk, false, 0), // TODO: parse our own boosts from DOM?
+    def: estimateStat(myBaseStats.def, false, 0),
+    spa: estimateStat(myBaseStats.spa, false, 0),
+    spd: estimateStat(myBaseStats.spd, false, 0),
+    spe: estimateStat(myBaseStats.spe, false, 0)
+  };
+  
+  let maxDangerScore = 0; // percent damage we take
+  let oppToWorryAbout = null;
+  let oppSpeed = 100;
+  
   for (const opp of opponents) {
     if (opp.status === 'FNT' || opp.status === 'fnt') continue;
-    const dangerScore = getDangerScore(myData.types, opp);
-    if (dangerScore > maxDangerScore) maxDangerScore = dangerScore;
     
-    let stateTags = [];
-    if (opp.status) stateTags.push(`Status: ${opp.status}`);
-    if (opp.boosts) {
-      const activeBoosts = Object.entries(opp.boosts)
-        .filter(([stat, val]) => val !== 0)
-        .map(([stat, val]) => `${stat}${val > 0 ? '+' : ''}${val}`);
-      if (activeBoosts.length > 0) stateTags.push(`Boosts: ${activeBoosts.join(', ')}`);
+    let oppData = cachedOppData[opp.name] || {};
+    let dangerScore = getDangerScore(myData.types, myBaseStats, opp, oppData);
+    if (dangerScore > maxDangerScore) {
+      maxDangerScore = dangerScore;
+      oppToWorryAbout = opp;
+      let oppBaseSpe = (oppData.baseStats && oppData.baseStats.spe) || 100;
+      oppSpeed = estimateStat(oppBaseSpe, false, opp.boosts.spe);
+      if (opp.status === 'PAR') oppSpeed /= 2;
     }
-    if (opp.revealedMoves && opp.revealedMoves.length > 0) {
-      stateTags.push(`Revealed Moves: ${opp.revealedMoves.join(', ')}`);
-    }
-    
-    const stateText = stateTags.length > 0 ? ` (${stateTags.join(' | ')})` : '';
-    log(`Opponent State: ${opp.name} - Types: ${opp.types.join('/') || 'Unknown'}${stateText}`);
   }
   
-  const dangerScore = maxDangerScore;
-  log(`Active Matchup: ${myData.name} takes max ${dangerScore}x damage from opponents.`);
+  let amISlower = myStats.spe < oppSpeed;
+  log(`Active Matchup: ${myData.name} takes estimated ${Math.round(maxDangerScore * 100)}% damage. Am I slower? ${amISlower}`);
 
   let bestMoveBtns = [];
   let bestMoveScore = -1;
@@ -496,76 +530,123 @@ function getBestAction(moveButtons, switchButtons) {
   let bestTargetName = null;
 
   for (const btn of moveButtons) {
-    let moveType = null;
-    const typeEl = btn.querySelector('.type');
-    if (typeEl) {
-      moveType = typeEl.textContent.trim();
-    } else {
-      const match = btn.className.match(/type-([a-zA-Z]+)/);
-      if (match) moveType = match[1];
-    }
-
     const moveName = btn.getAttribute('data-move');
-    const moveData = cachedMoveData[moveName] || { basePower: 60, category: 'Physical' };
-    let bp = moveData.basePower || 0;
-    let category = moveData.category || 'Status';
+    const moveData = cachedMoveData[moveName] || { basePower: 0, category: 'Status', type: 'Normal', priority: 0, accuracy: 100 };
     
-    // Penalize status moves unless no attacks are available
-    if (category === 'Status') {
-        bp = 5;
-    } else if (bp === 0) { // OHKO or variable BP moves
-        bp = 60; 
-    }
-
-    let bestScoreForThisMove = -1;
+    let score = 0;
     let targetForThisMove = null;
     
     for (const opp of opponents) {
         if (opp.status === 'FNT' || opp.status === 'fnt') continue;
+        let oppData = cachedOppData[opp.name] || {};
+        let oppBase = oppData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
         
-        let score = bp;
+        let oppStats = {
+          hp: estimateStat(oppBase.hp, true, 0),
+          def: estimateStat(oppBase.def, false, opp.boosts.def),
+          spd: estimateStat(oppBase.spd, false, opp.boosts.spd),
+        };
         
-        // "spa def moves": adjust score based on defense vs sp.def
-        const oppStats = (cachedOppData[opp.name] && cachedOppData[opp.name].baseStats) || { def: 100, spd: 100 };
-        if (category === 'Physical') {
-            score *= (100 / Math.max(10, oppStats.def));
-        } else if (category === 'Special') {
-            score *= (100 / Math.max(10, oppStats.spd));
+        let moveScore = 0;
+        
+        if (moveData.category === 'Status') {
+           // Heuristics for status moves
+           if (['Thunder Wave', 'Will-O-Wisp', 'Toxic', 'Spore', 'Sleep Powder'].includes(moveName)) {
+               if (!opp.status) {
+                   moveScore = 150; // High value for inflicting status
+                   if (moveName === 'Thunder Wave' && opp.types.includes('Ground')) moveScore = 0;
+                   if (moveName === 'Will-O-Wisp' && opp.types.includes('Fire')) moveScore = 0;
+                   if (moveName === 'Toxic' && (opp.types.includes('Poison') || opp.types.includes('Steel'))) moveScore = 0;
+               } else {
+                   moveScore = 0; // Don't use if already statused
+               }
+           }
+           else if (['Swords Dance', 'Dragon Dance', 'Nasty Plot', 'Calm Mind'].includes(moveName)) {
+               if (maxDangerScore < 0.4) {
+                   moveScore = 200; // Very high value if safe to setup
+               } else {
+                   moveScore = 10; // Unsafe to setup
+               }
+           }
+           else if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis'].includes(moveName)) {
+               // If taking moderate damage but we can heal it off
+               if (maxDangerScore < 0.6) {
+                   moveScore = 180;
+               } else {
+                   moveScore = 5;
+               }
+           }
+           else if (['Stealth Rock', 'Spikes', 'Toxic Spikes'].includes(moveName)) {
+               moveScore = 140; // Good early game
+           }
+           else {
+               moveScore = 10; // Generic status move
+           }
+        } else {
+           // Damage move
+           let damage = calculateEstimatedDamage(myStats, oppStats, moveData, myData.types, opp.types);
+           let percentDamage = damage / oppStats.hp;
+           
+           moveScore = percentDamage * 100; // Base score is % damage dealt
+           
+           // Priority bonus if we are slower and can KO
+           if (moveData.priority > 0 && percentDamage >= 1.0) {
+               moveScore += 500; // Almost definitely do this
+           }
+           
+           // If we are slower and will get OHKO'd, priority is our only hope
+           if (amISlower && maxDangerScore >= 1.0 && moveData.priority > 0) {
+               moveScore += 300;
+           }
+           
+           // Accuracy penalty
+           let acc = moveData.accuracy;
+           if (acc === true) acc = 100; // Swift, etc.
+           moveScore *= (acc / 100);
+           
+           // Common Immunities Check
+           let abilities = oppData.abilities || {};
+           let abilityValues = Object.values(abilities).join(' ').toLowerCase();
+           if (moveData.type === 'Ground' && abilityValues.includes('levitate')) moveScore = 0;
+           if (moveData.type === 'Fire' && abilityValues.includes('flash fire')) moveScore = 0;
+           if (moveData.type === 'Water' && (abilityValues.includes('water absorb') || abilityValues.includes('storm drain') || abilityValues.includes('dry skin'))) moveScore = 0;
+           if (moveData.type === 'Electric' && (abilityValues.includes('volt absorb') || abilityValues.includes('motor drive') || abilityValues.includes('lightning rod'))) moveScore = 0;
+           if (moveData.type === 'Grass' && abilityValues.includes('sap sipper')) moveScore = 0;
         }
         
-        if (moveType && opp.types.length > 0 && window.getEffectiveness) {
-          const mult = window.getEffectiveness(moveType, opp.types);
-          score *= mult;
-          if (myData.types.includes(moveType)) score *= 1.5; // STAB
-        }
-        if (score > bestScoreForThisMove) {
-            bestScoreForThisMove = score;
+        if (moveScore > score) {
+            score = moveScore;
             targetForThisMove = opp.name;
         }
     }
     
-    if (bestScoreForThisMove > bestMoveScore) {
-      bestMoveScore = bestScoreForThisMove;
+    if (score > bestMoveScore) {
+      bestMoveScore = score;
       bestMoveBtns = [btn];
       bestTargetName = targetForThisMove;
-      bestMoveLog = `Evaluated moves, best score: ${bestMoveScore} vs ${bestTargetName} (Type: ${moveType})`;
-    } else if (bestScoreForThisMove === bestMoveScore && bestMoveScore > -1) {
+      bestMoveLog = `Evaluated moves, best: ${moveName} score: ${Math.round(bestMoveScore)} vs ${bestTargetName}`;
+    } else if (score === bestMoveScore && bestMoveScore > -1) {
       bestMoveBtns.push(btn);
     }
   }
   
   let bestMoveBtn = bestMoveBtns.length > 0 ? randomChoice(bestMoveBtns) : null;
-  let botPower = bestMoveScore;
 
+  // Evaluate Switches
   let bestSwitchBtns = [];
-  let bestSwitchDamage = 999;
+  let bestSwitchDanger = 999;
   
-  if (moveButtons.length === 0 || dangerScore >= 2) {
-    log(`Danger score ${dangerScore.toFixed(1)}, moves=${moveButtons.length}. Evaluating switches...`);
+  // Basic Hazard Check - read the battle text for stealth rock
+  const historyText = (document.querySelector('.battle-history, .message-log') || {}).innerText || "";
+  let hazardsUp = historyText.includes('pointed stones') || historyText.includes('Spikes');
+  
+  if (moveButtons.length === 0 || maxDangerScore >= 1.0) { // If about to be OHKO'd
+    log(`Danger score ${Math.round(maxDangerScore*100)}%, moves=${moveButtons.length}. Evaluating switches...`);
     const allNames = window.Pokedex ? Object.keys(window.Pokedex).sort((a, b) => b.length - a.length) : [];
     
     for (const btn of switchButtons) {
       if (btn.disabled || btn.classList.contains('disabled')) continue;
+      if (btn.textContent.includes('fainted')) continue;
       
       let pkmnName = btn.textContent.trim();
       for (const name of allNames) {
@@ -576,25 +657,27 @@ function getBestAction(moveButtons, switchButtons) {
       }
       
       const pkmnTypes = window.Pokedex ? (window.Pokedex[pkmnName] || []) : [];
+      let pkmnData = cachedOppData[pkmnName] || {};
+      let pkmnBase = pkmnData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
       
-      let incomingDamage = 1;
+      let incomingDanger = 0;
       if (pkmnTypes.length > 0 && opponents.length > 0) {
-        incomingDamage = 0;
         for (const opp of opponents) {
             if (opp.status === 'FNT' || opp.status === 'fnt') continue;
-            if (opp.types.length > 0) {
-                for (const oppType of opp.types) {
-                  const mult = window.getEffectiveness(oppType, pkmnTypes);
-                  if (mult > incomingDamage) incomingDamage = mult;
-                }
-            }
+            let oppData = cachedOppData[opp.name] || {};
+            // Simulate danger for the incoming pokemon
+            let danger = getDangerScore(pkmnTypes, pkmnBase, opp, oppData);
+            if (danger > incomingDanger) incomingDanger = danger;
         }
       }
       
-      if (incomingDamage < bestSwitchDamage) {
-        bestSwitchDamage = incomingDamage;
+      // Add a penalty to incomingDanger if hazards are up (pseudo 12.5% damage added)
+      if (hazardsUp) incomingDanger += 0.125;
+      
+      if (incomingDanger < bestSwitchDanger) {
+        bestSwitchDanger = incomingDanger;
         bestSwitchBtns = [btn];
-      } else if (incomingDamage === bestSwitchDamage) {
+      } else if (incomingDanger === bestSwitchDanger) {
         bestSwitchBtns.push(btn);
       }
     }
@@ -603,19 +686,20 @@ function getBestAction(moveButtons, switchButtons) {
   let bestSwitchBtn = bestSwitchBtns.length > 0 ? randomChoice(bestSwitchBtns) : null;
 
   if (moveButtons.length === 0 && bestSwitchBtn) {
-    log(`Must switch (no moves). Chose defensively best option (Takes max ${bestSwitchDamage}x from STAB).`);
+    log(`Must switch (no moves). Chose defensively best option (Takes est ${Math.round(bestSwitchDanger*100)}% damage).`);
     return { btn: bestSwitchBtn, type: 'switch' };
   }
   
   if (bestMoveBtn) log(bestMoveLog);
 
-  if (bestSwitchBtn && dangerScore >= 2 && bestSwitchDamage < dangerScore && botPower < dangerScore) {
-    log(`DANGER AVERTED: Retreating! Best switch takes max ${bestSwitchDamage}x vs active taking ${dangerScore}x. (Bot Power: ${botPower})`);
+  // If a switch is significantly safer than staying in, and we are in OHKO danger, then switch
+  if (bestSwitchBtn && maxDangerScore >= 1.0 && bestSwitchDanger < 0.6) {
+    log(`DANGER AVERTED: Retreating! Best switch takes est ${Math.round(bestSwitchDanger*100)}% vs active taking ${Math.round(maxDangerScore*100)}%.`);
     return { btn: bestSwitchBtn, type: 'switch' };
   }
   
   if (bestMoveBtn) {
-    if (dangerScore >= 2) log(`DANGER WARNING: Staying in! Danger Score = ${dangerScore.toFixed(1)}, Bot Power = ${botPower}. Trying to strike.`);
+    if (maxDangerScore >= 1.0) log(`DANGER WARNING: Staying in! Danger = ${Math.round(maxDangerScore*100)}%, but attacking anyway.`);
     window.lastIntendedTarget = bestTargetName;
     return { btn: bestMoveBtn, type: 'move' };
   }
@@ -625,6 +709,7 @@ function getBestAction(moveButtons, switchButtons) {
 
   return { btn: switchButtons[0], type: 'switch' }; // Fallback
 }
+
 
 // ---------------------------------------------------------------------
 // Main decision loop

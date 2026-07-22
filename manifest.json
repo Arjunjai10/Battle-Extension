@@ -21,5 +21,11 @@
     "default_popup": "popup.html",
     "default_title": "Showdown Test Bot",
     "default_icon": "icon.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://play.pokemonshowdown.com/*"]
+    }
+  ]
 }
