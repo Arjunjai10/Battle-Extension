@@ -176,7 +176,7 @@ function maybeLogDiagnostic() {
 }
 
 // ---------------------------------------------------------------------
-function getOpponentState(opponentName) {
+function getOpponentState(opponentName, bar) {
   const history = document.querySelector('.battle-history, .message-log');
   let teraType = null;
   let tempType = null;
@@ -248,14 +248,14 @@ function getOpponentState(opponentName) {
 
   // Get status from statbar
   let status = null;
-  const statbars = document.querySelectorAll('.statbar');
-  for (const bar of statbars) {
-    if (bar.classList.contains('rstatbar') || (bar.getAttribute('data-side') || '').startsWith('p2')) {
-      const statusSpan = bar.querySelector('.status');
-      if (statusSpan && statusSpan.textContent.trim()) {
-        status = statusSpan.textContent.trim();
-      }
-      break;
+  if (bar) {
+    const statusSpan = bar.querySelector('.status');
+    if (statusSpan && statusSpan.textContent.trim()) {
+      status = statusSpan.textContent.trim();
+    }
+    const hpText = bar.querySelector('.hptext');
+    if (hpText && (hpText.textContent.trim() === '0%' || hpText.textContent.trim() === '0/0')) {
+      status = 'FNT';
     }
   }
   
@@ -323,72 +323,54 @@ function getMyActiveTypes() {
   return { name: myName || "Unknown", types: finalTypes };
 }
 
-function getOpponentTypes() {
-  if (!window.Pokedex) return { name: "Unknown", types: [], revealedMoves: [] };
+function getOpponents() {
+  if (!window.Pokedex) return [];
   const statbars = document.querySelectorAll('.statbar');
-  let opponentName = null;
+  let opponents = [];
   
   for (const bar of statbars) {
-    // Look for opponent statbar
-    if (bar.classList.contains('rstatbar') || (bar.getAttribute('data-side') || '').startsWith('p2')) {
+    if (bar.classList.contains('rstatbar') || (bar.getAttribute('data-side') || '').startsWith('p2') || (bar.getAttribute('data-side') || '').startsWith('p3') || (bar.getAttribute('data-side') || '').startsWith('p4')) {
       const strong = bar.querySelector('strong');
       if (strong) {
         let rawName = strong.textContent.trim();
-        // Remove level (e.g. L78) and gender symbols
-        opponentName = rawName.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
-      }
-    }
-  }
-  
-  if (!opponentName) {
-    const strong = document.querySelector('.statbar strong');
-    if (strong) {
-      let rawName = strong.textContent.trim();
-      opponentName = rawName.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
-    }
-  }
-
-  let finalTypes = [];
-  let isOverride = false;
-  let revealedMoves = [];
-  let boosts = {};
-  let status = null;
-
-  if (opponentName) {
-    revealedMoves = getRevealedMoves(opponentName);
-    const oppState = getOpponentState(opponentName);
-    
-    if (oppState.typeOverride) {
-      finalTypes = oppState.typeOverride;
-      isOverride = true;
-    } else {
-      const types = window.Pokedex[opponentName];
-      if (types) {
-        finalTypes = types;
-      } else {
-        // Normalize if exact match fails
-        const normalized = opponentName.replace(/[^a-zA-Z0-9-]/g, '');
-        for (const key in window.Pokedex) {
-          if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
-            finalTypes = window.Pokedex[key];
-            opponentName = key;
-            break;
+        let opponentName = rawName.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
+        
+        let finalTypes = [];
+        let isOverride = false;
+        let revealedMoves = getRevealedMoves(opponentName);
+        const oppState = getOpponentState(opponentName, bar);
+        
+        if (oppState.typeOverride) {
+          finalTypes = oppState.typeOverride;
+          isOverride = true;
+        } else {
+          const types = window.Pokedex[opponentName];
+          if (types) {
+            finalTypes = types;
+          } else {
+            const normalized = opponentName.replace(/[^a-zA-Z0-9-]/g, '');
+            for (const key in window.Pokedex) {
+              if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
+                finalTypes = window.Pokedex[key];
+                opponentName = key;
+                break;
+              }
+            }
           }
         }
+        
+        opponents.push({
+          name: opponentName || "Unknown",
+          types: finalTypes,
+          isOverride: isOverride,
+          revealedMoves: revealedMoves,
+          boosts: oppState.boosts,
+          status: oppState.status
+        });
       }
     }
-    boosts = oppState.boosts;
-    status = oppState.status;
   }
-  
-  return { 
-    name: opponentName || "Unknown", 
-    types: finalTypes, 
-    isOverride: isOverride,
-    revealedMoves: revealedMoves,
-    boosts: boosts,
-    status: status
-  };
+  return opponents;
 }
 
 function getDangerScore(myTypes, oppState) {
@@ -411,32 +393,37 @@ function getDangerScore(myTypes, oppState) {
 
 function getBestAction(moveButtons, switchButtons) {
   const myData = getMyActiveTypes();
-  const oppData = getOpponentTypes();
-  const oppTypes = oppData.types;
+  const opponents = getOpponents();
   
-  log(`Opponent State: ${oppData.name} - Types: ${oppTypes.join('/')}, Boosts: atk=${oppData.boosts.atk || 0} spa=${oppData.boosts.spa || 0}, Moves: ${oppData.revealedMoves.join(', ') || 'None'}`);
-
-  let stateTags = [];
-  if (oppData.status) stateTags.push(`Status: ${oppData.status}`);
-  if (oppData.boosts) {
-    const activeBoosts = Object.entries(oppData.boosts)
-      .filter(([stat, val]) => val !== 0)
-      .map(([stat, val]) => `${stat}${val > 0 ? '+' : ''}${val}`);
-    if (activeBoosts.length > 0) stateTags.push(`Boosts: ${activeBoosts.join(', ')}`);
+  let maxDangerScore = 0;
+  for (const opp of opponents) {
+    if (opp.status === 'FNT' || opp.status === 'fnt') continue;
+    const dangerScore = getDangerScore(myData.types, opp);
+    if (dangerScore > maxDangerScore) maxDangerScore = dangerScore;
+    
+    let stateTags = [];
+    if (opp.status) stateTags.push(`Status: ${opp.status}`);
+    if (opp.boosts) {
+      const activeBoosts = Object.entries(opp.boosts)
+        .filter(([stat, val]) => val !== 0)
+        .map(([stat, val]) => `${stat}${val > 0 ? '+' : ''}${val}`);
+      if (activeBoosts.length > 0) stateTags.push(`Boosts: ${activeBoosts.join(', ')}`);
+    }
+    if (opp.revealedMoves && opp.revealedMoves.length > 0) {
+      stateTags.push(`Revealed Moves: ${opp.revealedMoves.join(', ')}`);
+    }
+    
+    const stateText = stateTags.length > 0 ? ` (${stateTags.join(' | ')})` : '';
+    log(`Opponent State: ${opp.name} - Types: ${opp.types.join('/') || 'Unknown'}${stateText}`);
   }
-  if (oppData.revealedMoves && oppData.revealedMoves.length > 0) {
-    stateTags.push(`Revealed Moves: ${oppData.revealedMoves.join(', ')}`);
-  }
   
-  const stateText = stateTags.length > 0 ? ` (${stateTags.join(' | ')})` : '';
-  log(`--- Evaluating vs ${oppData.name} (Types: ${oppTypes.join('/') || 'Unknown'})${stateText} ---`);
-  
-  const dangerScore = getDangerScore(myData.types, oppData);
-  log(`Active Matchup: ${myData.name} takes max ${dangerScore}x damage from opponent STABs.`);
+  const dangerScore = maxDangerScore;
+  log(`Active Matchup: ${myData.name} takes max ${dangerScore}x damage from opponents.`);
 
   let bestMoveBtns = [];
   let bestMoveScore = -1;
   let bestMoveLog = "";
+  let bestTargetName = null;
 
   for (const btn of moveButtons) {
     let moveType = null;
@@ -448,30 +435,41 @@ function getBestAction(moveButtons, switchButtons) {
       if (match) moveType = match[1];
     }
 
-    let score = 1;
-    if (moveType && oppTypes.length > 0 && window.getEffectiveness) {
-      score = window.getEffectiveness(moveType, oppTypes);
-      if (myData.types.includes(moveType)) score *= 1.5; // STAB
+    let bestScoreForThisMove = -1;
+    let targetForThisMove = null;
+    
+    for (const opp of opponents) {
+        if (opp.status === 'FNT' || opp.status === 'fnt') continue;
+        
+        let score = 1;
+        if (moveType && opp.types.length > 0 && window.getEffectiveness) {
+          score = window.getEffectiveness(moveType, opp.types);
+          if (myData.types.includes(moveType)) score *= 1.5; // STAB
+        }
+        if (score > bestScoreForThisMove) {
+            bestScoreForThisMove = score;
+            targetForThisMove = opp.name;
+        }
     }
     
-    if (score > bestMoveScore) {
-      bestMoveScore = score;
+    if (bestScoreForThisMove > bestMoveScore) {
+      bestMoveScore = bestScoreForThisMove;
       bestMoveBtns = [btn];
-      bestMoveLog = `Evaluated moves, best score: ${score} (e.g. Type: ${moveType})`;
-    } else if (score === bestMoveScore) {
+      bestTargetName = targetForThisMove;
+      bestMoveLog = `Evaluated moves, best score: ${bestMoveScore} vs ${bestTargetName} (Type: ${moveType})`;
+    } else if (bestScoreForThisMove === bestMoveScore && bestMoveScore > -1) {
       bestMoveBtns.push(btn);
     }
   }
   
   let bestMoveBtn = bestMoveBtns.length > 0 ? randomChoice(bestMoveBtns) : null;
+  let botPower = bestMoveScore;
 
   let bestSwitchBtns = [];
   let bestSwitchDamage = 999;
   
-  // If we are forced to switch (no move buttons) or in high danger (dangerScore >= 2)
   if (moveButtons.length === 0 || dangerScore >= 2) {
     log(`Danger score ${dangerScore.toFixed(1)}, moves=${moveButtons.length}. Evaluating switches...`);
-    // Pre-compute all known Pokedex names to find matches in button text
     const allNames = window.Pokedex ? Object.keys(window.Pokedex).sort((a, b) => b.length - a.length) : [];
     
     for (const btn of switchButtons) {
@@ -488,11 +486,16 @@ function getBestAction(moveButtons, switchButtons) {
       const pkmnTypes = window.Pokedex ? (window.Pokedex[pkmnName] || []) : [];
       
       let incomingDamage = 1;
-      if (pkmnTypes.length > 0 && oppTypes.length > 0) {
+      if (pkmnTypes.length > 0 && opponents.length > 0) {
         incomingDamage = 0;
-        for (const oppType of oppTypes) {
-          const mult = window.getEffectiveness(oppType, pkmnTypes);
-          if (mult > incomingDamage) incomingDamage = mult;
+        for (const opp of opponents) {
+            if (opp.status === 'FNT' || opp.status === 'fnt') continue;
+            if (opp.types.length > 0) {
+                for (const oppType of opp.types) {
+                  const mult = window.getEffectiveness(oppType, pkmnTypes);
+                  if (mult > incomingDamage) incomingDamage = mult;
+                }
+            }
         }
       }
       
@@ -507,29 +510,27 @@ function getBestAction(moveButtons, switchButtons) {
   
   let bestSwitchBtn = bestSwitchBtns.length > 0 ? randomChoice(bestSwitchBtns) : null;
 
-  // Decision Logic
   if (moveButtons.length === 0 && bestSwitchBtn) {
-    log(`Must switch (no moves). Chose defensively best option (Takes ${bestSwitchDamage}x from STAB).`);
+    log(`Must switch (no moves). Chose defensively best option (Takes max ${bestSwitchDamage}x from STAB).`);
     return { btn: bestSwitchBtn, type: 'switch' };
   }
   
   if (bestMoveBtn) log(bestMoveLog);
 
-  if (bestSwitchBtn && dangerScore >= 2 && bestSwitchDamage < dangerScore) {
-    log(`DANGER AVERTED: Retreating! Best switch takes ${bestSwitchDamage}x vs active taking ${dangerScore}x.`);
+  if (bestSwitchBtn && dangerScore >= 2 && bestSwitchDamage < dangerScore && botPower < dangerScore) {
+    log(`DANGER AVERTED: Retreating! Best switch takes max ${bestSwitchDamage}x vs active taking ${dangerScore}x. (Bot Power: ${botPower})`);
     return { btn: bestSwitchBtn, type: 'switch' };
   }
   
   if (bestMoveBtn) {
-    if (dangerScore >= 2) log(`DANGER WARNING: Staying in! Danger Score = ${dangerScore.toFixed(1)}. Trying to strike.`);
+    if (dangerScore >= 2) log(`DANGER WARNING: Staying in! Danger Score = ${dangerScore.toFixed(1)}, Bot Power = ${botPower}. Trying to strike.`);
+    window.lastIntendedTarget = bestTargetName;
     return { btn: bestMoveBtn, type: 'move' };
   }
   
-  // Absolute fallback if everything fails
   if (moveButtons.length > 0) return { btn: moveButtons[0], type: 'move' };
   if (switchButtons.length > 0) return { btn: switchButtons[0], type: 'switch' };
 
-  
   return { btn: switchButtons[0], type: 'switch' }; // Fallback
 }
 
@@ -581,8 +582,15 @@ function evaluateAndAct() {
     let category = "";
 
     if (target.buttons.length > 0) {
-      // Pick a random target to ensure we don't only hit one player in FFA
       chosen = randomChoice(target.buttons);
+      if (window.lastIntendedTarget) {
+          for (const btn of target.buttons) {
+              if (btn.textContent.includes(window.lastIntendedTarget)) {
+                  chosen = btn;
+                  break;
+              }
+          }
+      }
       category = 'target';
     } else if (move.buttons.length > 0 || switches.buttons.length > 0) {
       const action = getBestAction(move.buttons, switches.buttons);
