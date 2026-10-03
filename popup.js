@@ -1,15 +1,21 @@
 const toggle = document.getElementById("enabledToggle");
+const intelligenceSelect = document.getElementById("intelligenceSelect");
 const exportBtn = document.getElementById("exportBtn");
 const clearBtn = document.getElementById("clearBtn");
 const status = document.getElementById("status");
 
-chrome.storage.local.get({ enabled: false, bugLog: [] }, (data) => {
+chrome.storage.local.get({ enabled: false, intelligence: "max", bugLog: [] }, (data) => {
   toggle.checked = data.enabled;
+  intelligenceSelect.value = data.intelligence;
   status.textContent = `${data.bugLog.length} log entries stored.`;
 });
 
 toggle.addEventListener("change", () => {
   chrome.storage.local.set({ enabled: toggle.checked });
+});
+
+intelligenceSelect.addEventListener("change", () => {
+  chrome.storage.local.set({ intelligence: intelligenceSelect.value });
 });
 
 exportBtn.addEventListener("click", () => {

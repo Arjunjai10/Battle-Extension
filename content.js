@@ -468,7 +468,146 @@ function getDangerScore(myTypes, myStats, oppState, oppData) {
   return { score: percentDamage, expectedType: mostDangerousType };
 }
 
+function getRandomAction(moveButtons, switchButtons) {
+  let all = [];
+  if (moveButtons) all.push(...moveButtons);
+  if (switchButtons) all.push(...switchButtons);
+  if (all.length === 0) return null;
+  const btn = all[Math.floor(Math.random() * all.length)];
+  return { btn, type: moveButtons && moveButtons.includes(btn) ? 'move' : 'switch' };
+}
+
 function getBestAction(moveButtons, switchButtons) {
+  if (intelligenceLevel === 'random') {
+    return getRandomAction(moveButtons, switchButtons);
+  } else if (intelligenceLevel === 'max') {
+    return getMaxIntelligenceAction(moveButtons, switchButtons);
+  } else {
+    return getHeuristicAction(moveButtons, switchButtons);
+  }
+}
+
+function getMaxIntelligenceAction(moveButtons, switchButtons) {
+  const myData = getMyActiveTypes();
+  const opponents = getOpponents();
+  
+  const missingOpps = opponents.map(o => o.name).filter(n => n && !cachedOppData[n]);
+  if (missingOpps.length > 0) window.postMessage({ direction: 'from-extension', type: 'FETCH_OPPONENTS', opponents: missingOpps }, '*');
+  const missingMoves = moveButtons.map(btn => btn.getAttribute('data-move')).filter(m => m && !cachedMoveData[m]);
+  if (missingMoves.length > 0) window.postMessage({ direction: 'from-extension', type: 'FETCH_MOVES', moves: missingMoves }, '*');
+
+  let myBaseStats = {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
+  if (cachedOppData[myData.name]) myBaseStats = cachedOppData[myData.name].baseStats || myBaseStats;
+  else if (!cachedOppData[myData.name]) window.postMessage({ direction: 'from-extension', type: 'FETCH_OPPONENTS', opponents: [myData.name] }, '*');
+
+  if (missingOpps.length > 0 || missingMoves.length > 0 || !cachedOppData[myData.name]) return null;
+
+  let myStats = {
+    hp: estimateStat(myBaseStats.hp, true, 0),
+    def: estimateStat(myBaseStats.def, false, 0),
+    spd: estimateStat(myBaseStats.spd, false, 0),
+    spe: estimateStat(myBaseStats.spe, false, 0)
+  };
+  
+  let opp = opponents.find(o => o.status !== 'FNT' && o.status !== 'fnt') || opponents[0];
+  if (!opp) return getRandomAction(moveButtons, switchButtons);
+  
+  let oppData = cachedOppData[opp.name] || {};
+  let oppBase = oppData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
+  let oppStats = {
+    hp: estimateStat(oppBase.hp, true, 0),
+    def: estimateStat(oppBase.def, false, opp.boosts.def),
+    spd: estimateStat(oppBase.spd, false, opp.boosts.spd),
+    spe: estimateStat(oppBase.spe, false, opp.boosts.spe)
+  };
+  if (opp.status === 'PAR') oppStats.spe /= 2;
+  
+  let amISlower = myStats.spe < oppStats.spe;
+  let dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData);
+  let maxDangerScore = dangerResult.score;
+  let predictedAttack = dangerResult.expectedType;
+
+  let bestAction = null;
+  let bestScore = -9999;
+  
+  // Evaluate Moves
+  for (const btn of moveButtons) {
+    const moveName = btn.getAttribute('data-move');
+    const moveData = cachedMoveData[moveName] || { basePower: 0, category: 'Status', type: 'Normal', priority: 0, accuracy: 100 };
+    let moveScore = 0;
+    
+    if (moveData.category === 'Status') {
+      moveScore = 10;
+      if (['Thunder Wave', 'Will-O-Wisp', 'Toxic', 'Spore'].includes(moveName) && !opp.status) moveScore = 150;
+      if (['Roost', 'Recover', 'Soft-Boiled'].includes(moveName) && maxDangerScore > 0.4 && maxDangerScore < 0.8) moveScore = 180;
+      if (['Swords Dance', 'Nasty Plot', 'Dragon Dance'].includes(moveName) && maxDangerScore < 0.3) moveScore = 200;
+    } else {
+      let damage = calculateEstimatedDamage(myStats, oppStats, moveData, myData.types, opp.types);
+      let percentDamage = damage / oppStats.hp;
+      moveScore = percentDamage * 100;
+      
+      let acc = moveData.accuracy === true ? 100 : moveData.accuracy;
+      moveScore *= (acc / 100);
+      
+      if (!amISlower || moveData.priority > 0) {
+        if (percentDamage >= 1.0) moveScore += 1000;
+        else moveScore -= (maxDangerScore * 100);
+      } else {
+        if (maxDangerScore >= 1.0) moveScore = -1000;
+        else moveScore -= (maxDangerScore * 100);
+      }
+    }
+    
+    if (moveScore > bestScore) {
+      bestScore = moveScore;
+      bestAction = { btn: btn, type: 'move' };
+    }
+  }
+  
+  // Evaluate Switches
+  const historyText = (document.querySelector('.battle-history, .message-log') || {}).innerText || "";
+  let hazardsUp = historyText.includes('pointed stones') || historyText.includes('Spikes');
+  
+  const allNames = window.Pokedex ? Object.keys(window.Pokedex).sort((a, b) => b.length - a.length) : [];
+  for (const btn of switchButtons) {
+    if (btn.disabled || btn.classList.contains('disabled')) continue;
+    if (btn.textContent.includes('fainted')) continue;
+    
+    let pkmnName = btn.textContent.trim();
+    for (const name of allNames) {
+      if (pkmnName.includes(name)) { pkmnName = name; break; }
+    }
+    
+    const pkmnTypes = window.Pokedex ? (window.Pokedex[pkmnName] || []) : [];
+    let pkmnData = cachedOppData[pkmnName] || {};
+    let pkmnBase = pkmnData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
+    
+    let incDanger = getDangerScore(pkmnTypes, pkmnBase, opp, oppData).score;
+    if (predictedAttack) {
+       let effect = window.getEffectiveness ? window.getEffectiveness(predictedAttack, pkmnTypes) : 1;
+       if (effect === 0) incDanger -= 1.0;
+       else if (effect < 1) incDanger -= 0.5;
+       else if (effect > 1) incDanger += 0.5;
+    }
+    if (hazardsUp) incDanger += 0.125;
+    
+    let switchScore = -(incDanger * 100);
+    if (maxDangerScore >= 1.0 && incDanger < 0.5) switchScore += 500;
+    
+    if (switchScore > bestScore) {
+      bestScore = switchScore;
+      bestAction = { btn: btn, type: 'switch' };
+    }
+  }
+  
+  if (bestAction && bestAction.type === 'move') {
+      window.lastIntendedTarget = opp.name;
+  }
+  
+  return bestAction || { btn: moveButtons[0] || switchButtons[0], type: moveButtons.length > 0 ? 'move' : 'switch' };
+}
+
+function getHeuristicAction(moveButtons, switchButtons) {
   const myData = getMyActiveTypes();
   const opponents = getOpponents();
   
@@ -885,18 +1024,27 @@ const observer = new MutationObserver(() => scheduleEvaluate());
 observer.observe(document.body, { childList: true, subtree: true });
 pollInterval = setInterval(evaluateAndAct, 1000);
 
-chrome.storage.local.get({ enabled: false }, (data) => {
+let intelligenceLevel = 'max';
+
+chrome.storage.local.get({ enabled: false, intelligence: 'max' }, (data) => {
   enabled = data.enabled;
-  log(`Content script loaded. Enabled=${enabled}`);
+  intelligenceLevel = data.intelligence;
+  log(`Content script loaded. Enabled=${enabled}, Intelligence=${intelligenceLevel}`);
   evaluateAndAct();
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.enabled) {
-    enabled = changes.enabled.newValue;
-    log(`Toggled ${enabled ? "ON" : "OFF"}`);
-    lastActedSignature = null;
-    lastFoundAnyAt = Date.now();
+  if (area === "local") {
+    if (changes.enabled) {
+      enabled = changes.enabled.newValue;
+      log(`Toggled ${enabled ? "ON" : "OFF"}`);
+      lastActedSignature = null;
+      lastFoundAnyAt = Date.now();
+    }
+    if (changes.intelligence) {
+      intelligenceLevel = changes.intelligence.newValue;
+      log(`Intelligence changed to ${intelligenceLevel}`);
+    }
     evaluateAndAct();
   }
 });
