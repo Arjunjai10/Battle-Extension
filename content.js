@@ -509,15 +509,18 @@ function getBestAction(moveButtons, switchButtons) {
   let maxDangerScore = 0; // percent damage we take
   let oppToWorryAbout = null;
   let oppSpeed = 100;
+  let predictedAttack = null;
   
   if (opponents && opponents.length > 0) {
     for (const opp of opponents) {
       if (opp.status === 'FNT' || opp.status === 'fnt') continue;
       
       let oppData = cachedOppData[opp.name] || {};
-      let dangerScore = getDangerScore(myData.types, myBaseStats, opp, oppData);
+      let dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData);
+      let dangerScore = dangerResult.score;
       if (dangerScore > maxDangerScore) {
         maxDangerScore = dangerScore;
+        predictedAttack = dangerResult.expectedType;
         oppToWorryAbout = opp;
         let oppBaseSpe = (oppData.baseStats && oppData.baseStats.spe) || 100;
         oppSpeed = estimateStat(oppBaseSpe, false, opp.boosts.spe);
@@ -688,7 +691,18 @@ function getBestAction(moveButtons, switchButtons) {
             if (opp.status === 'FNT' || opp.status === 'fnt') continue;
             let oppData = cachedOppData[opp.name] || {};
             // Simulate danger for the incoming pokemon
-            let danger = getDangerScore(pkmnTypes, pkmnBase, opp, oppData);
+            let dangerResult = getDangerScore(pkmnTypes, pkmnBase, opp, oppData);
+            let danger = dangerResult.score;
+            
+            // Analyze the opponent for their next attack!
+            // If they are likely targeting our current weakness, try to catch it with an immunity/resistance!
+            if (predictedAttack) {
+                let effectOnSwitch = window.getEffectiveness ? window.getEffectiveness(predictedAttack, pkmnTypes) : 1;
+                if (effectOnSwitch === 0) danger -= 1.0;      // Huge bonus for immunity
+                else if (effectOnSwitch < 1) danger -= 0.5; // Bonus for resistance
+                else if (effectOnSwitch > 1) danger += 0.5; // Penalty for weakness to predicted attack
+            }
+            
             if (danger > incomingDanger) incomingDanger = danger;
         }
       }
