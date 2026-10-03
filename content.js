@@ -553,8 +553,12 @@ function estimateStat(baseStat, isHp = false, boosts = 0) {
 }
 
 function calculateEstimatedDamage(attackerStats, defenderStats, move, attackerTypes, defenderTypes) {
-  const bp = move.basePower || 0;
-  if (bp === 0) return 0;
+  let bp = move.basePower || 0;
+  if (bp === 0) {
+     if (['Heavy Slam', 'Heat Crash', 'Grass Knot', 'Low Kick', 'Gyro Ball', 'Electro Ball'].includes(move.name)) bp = 80;
+     else if (move.category !== 'Status') bp = 50;
+     else return 0;
+  }
 
   // Hard zero for type immunities — this prevents the bot from ever selecting
   // a move that literally cannot hit (e.g. Fighting vs Ghost, Psychic vs Dark,
@@ -760,7 +764,8 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
   let dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData, myBoosts);
   const oppExpectedMoves = [
     { name: 'Assumed STAB', basePower: 90, type: (opp.types && opp.types.length > 0) ? opp.types[0] : 'Normal', category: oppBase.atk > oppBase.spa ? 'Physical' : 'Special', priority: 0, accuracy: 100 },
-    { name: 'Assumed Coverage', basePower: 80, type: dangerResult.expectedType || 'Normal', category: oppBase.atk > oppBase.spa ? 'Physical' : 'Special', priority: 0, accuracy: 100 }
+    { name: 'Assumed Coverage', basePower: 80, type: dangerResult.expectedType || 'Normal', category: oppBase.atk > oppBase.spa ? 'Physical' : 'Special', priority: 0, accuracy: 100 },
+    { name: 'Assumed Status/Switch', category: 'Status', priority: 0, accuracy: 100, isSwitch: true } // Simulates them not attacking us
   ];
 
   function simulate1Ply(myAction, oppMoveAssumed) {
@@ -792,20 +797,31 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
           } else {
               let dmg = calculateEstimatedDamage(myStats, oppStats, m, myData.types, opp.types);
               let acc = m.accuracy === true ? 100 : (m.accuracy || 100);
-              if (m.name === 'Sucker Punch') acc = 40; // Penalize heavily to account for risk of failure against non-attacks
+              if (m.name === 'Sucker Punch') {
+                  if (oppMoveAssumed.category === 'Status' || oppMoveAssumed.isSwitch) dmg = 0; // Fails entirely!
+                  else acc = 100; // If they attack, it hits (assuming no evasion).
+              }
               dmg = dmg * (acc / 100);
               oppEndHp = Math.max(0, oppEndHp - dmg);
           }
       }
 
       function resolveOppAction() {
+          if (oppMoveAssumed.category === 'Status') {
+              if (oppMoveAssumed.isSwitch) {
+                  // Simulate opponent switching to a resist: our damage is halved.
+                  oppEndHp = oppStats.hp * (opp.hp !== undefined ? opp.hp : 1.0); // Reset their HP (new mon)
+              }
+              return; // They don't do damage to us
+          }
           let dmg = calculateEstimatedDamage(oppStats, myStats, oppMoveAssumed, opp.types, myData.types);
           myEndHp = Math.max(0, myEndHp - dmg);
       }
 
-      if (iGoFirst) {
+      if (iGoFirst || oppMoveAssumed.isSwitch) {
+          if (oppMoveAssumed.isSwitch) resolveOppAction();
           resolveMyAction();
-          if (oppEndHp > 0) resolveOppAction();
+          if (oppEndHp > 0 && !oppMoveAssumed.isSwitch) resolveOppAction();
       } else {
           resolveOppAction();
           if (myEndHp > 0) resolveMyAction();
