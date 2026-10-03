@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Showdown Test Bot</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700;900&display=swap');
@@ -195,6 +196,22 @@
     #status:empty {
       display: none;
     }
+
+    /* Keyboard focus ring — visible for keyboard users, hidden on mouse click */
+    :focus-visible {
+      outline: 3px solid #000;
+      outline-offset: 2px;
+    }
+
+    footer {
+      margin-top: 16px;
+      font-size: 11px;
+      font-weight: 700;
+      text-align: center;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
   </style>
 </head>
 <body>
@@ -217,9 +234,10 @@
         <option value="max">Max (Optimal)</option>
       </select>
     </div>
-    <button id="exportBtn">Export Bug Log</button>
-    <button id="clearBtn">Clear Log</button>
-    <div id="status"></div>
+    <button id="exportBtn" aria-label="Export bug log as a text file">Export Bug Log</button>
+    <button id="clearBtn"  aria-label="Clear all stored log entries">Clear Log</button>
+    <div id="status" role="status" aria-live="polite"></div>
+    <footer>v0.1.0 — Test/Unrated battles only</footer>
   </div>
   <script src="popup.js"></script>
 </body>

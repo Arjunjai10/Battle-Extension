@@ -24,25 +24,62 @@
 const SELECTOR_SETS = {
   move: [
     'button[name="chooseMove"]:not([disabled])',
-    ".movemenu button:not(.disabled)",
+    '.movemenu button:not(.disabled)',
   ],
   target: [
     'button[name="chooseMoveTarget"]:not([disabled])',
     'button[name="chooseTarget"]:not([disabled])',
-    ".targetmenu button:not([disabled])"
+    '.targetmenu button:not([disabled])',
   ],
   switch: [
     'button[name="chooseSwitch"]:not([disabled])',
-    ".switchmenu button:not(.disabled)",
+    '.switchmenu button:not(.disabled)',
   ],
   teamPreview: [
     'button[name="chooseTeamPreview"]:not([disabled])',
-    ".teampreview button",
+    '.teampreview button',
   ],
 };
 
 const ACTION_DELAY_MS = [300, 900];
-const STUCK_THRESHOLD_MS = 10000;
+const STUCK_THRESHOLD_MS = 10_000;
+
+// Shared constants to avoid duplication across stat-parsing functions
+const STAT_MAP = {
+  'attack': 'atk', 'defense': 'def', 'sp. atk': 'spa',
+  'sp. def': 'spd', 'speed': 'spe', 'accuracy': 'accuracy', 'evasiveness': 'evasion'
+};
+const DEFAULT_MOVE_DATA = { basePower: 0, category: 'Status', type: 'Normal', priority: 0, accuracy: 100 };
+const DEFAULT_BASE_STATS = { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 100 };
+
+/** Returns true if `status` represents a fainted Pokémon. */
+function isFainted(status) {
+  return status === 'FNT' || status === 'fnt';
+}
+
+/** Parses a stat stage change severity word into a numeric amount (1/2/3). */
+function parseSeverity(severityWord) {
+  const s = (severityWord || '').trim().toLowerCase();
+  if (s === 'sharply' || s === 'harshly') return 2;
+  if (s === 'drastically' || s === 'severely') return 3;
+  return 1;
+}
+
+/**
+ * Resolves a raw Pokémon display name (which may include level, gender symbols,
+ * or alternate casing) to the canonical Pokedex key.
+ * Returns the canonical name, or the cleaned raw name if not found.
+ */
+function resolvePokedexName(rawName) {
+  if (!window.Pokedex) return rawName;
+  const cleaned = rawName.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
+  if (window.Pokedex[cleaned]) return cleaned;
+  const normalized = cleaned.replace(/[^a-zA-Z0-9-]/g, '');
+  for (const key in window.Pokedex) {
+    if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) return key;
+  }
+  return cleaned;
+}
 
 // --- Injected script to fetch data from main world ---
 let cachedMoveData = {};
@@ -52,14 +89,14 @@ window.addEventListener('message', (event) => {
   if (event.source !== window || !event.data || event.data.direction !== 'from-page') return;
   if (event.data.type === 'MOVES_RESULT') {
     for (const [m, data] of Object.entries(event.data.result)) {
-       cachedMoveData[m] = data || { basePower: 0, category: 'Status', type: 'Normal', priority: 0, accuracy: 100 };
+      cachedMoveData[m] = data || DEFAULT_MOVE_DATA;
     }
   }
   if (event.data.type === 'OPP_RESULT') {
     for (const [name, data] of Object.entries(event.data.result)) {
-       let obj = data || { baseStats: { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 100 } };
-       if (!obj.baseStats) obj.baseStats = { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 100 };
-       cachedOppData[name] = obj;
+      const obj = data || { baseStats: { ...DEFAULT_BASE_STATS } };
+      if (!obj.baseStats) obj.baseStats = { ...DEFAULT_BASE_STATS };
+      cachedOppData[name] = obj;
     }
   }
 });
@@ -75,26 +112,33 @@ let isLogging = false;
 function processLogQueue() {
   if (isLogging || logQueue.length === 0) return;
   isLogging = true;
-  
+
   const entries = [...logQueue];
   logQueue = [];
-  
+
   try {
     chrome.storage.local.get({ bugLog: [] }, (data) => {
       if (chrome.runtime.lastError) {
+        // Context invalidated (extension updated/reloaded) — drop entries gracefully
+        console.warn('[ShowdownTestBot] storage.get error:', chrome.runtime.lastError.message);
         isLogging = false;
         return;
       }
       const bugLog = data.bugLog;
       bugLog.push(...entries);
-      while (bugLog.length > 500) bugLog.shift();
+      // Cap log at 500 entries (FIFO eviction)
+      if (bugLog.length > 500) bugLog.splice(0, bugLog.length - 500);
       chrome.storage.local.set({ bugLog }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn('[ShowdownTestBot] storage.set error:', chrome.runtime.lastError.message);
+        }
         isLogging = false;
         if (logQueue.length > 0) processLogQueue();
       });
     });
   } catch (err) {
-    console.log("[ShowdownTestBot] Could not save log (context invalidated).");
+    // Extension context invalidated — silently stop logging
+    console.warn('[ShowdownTestBot] Could not save log (context invalidated):', err.message);
     isLogging = false;
   }
 }
@@ -196,6 +240,8 @@ function maybeLogDiagnostic() {
 }
 
 // ---------------------------------------------------------------------
+// Opponent state: type overrides, stat boosts, status from battle history
+// ---------------------------------------------------------------------
 function getOpponentState(opponentName, bar) {
   const history = document.querySelector('.battle-history, .message-log');
   let teraType = null;
@@ -203,194 +249,295 @@ function getOpponentState(opponentName, bar) {
   let hasSwitchedIn = false;
   let bellyDrumSeen = false;
   let boosts = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, accuracy: 0, evasion: 0 };
-  
+
   if (history) {
-    const lines = history.innerText.split('\n').map(l => l.trim()).filter(l => l.length > 0).reverse();
-    const escapedName = opponentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    
-    const teraRegex = new RegExp(`The opposing ${escapedName} terastallized into the ([A-Za-z]+) type`, 'i');
-    const typeChangeRegex = new RegExp(`The opposing ${escapedName}.*type changed to ([A-Za-z]+)`, 'i');
-    const switchRegex = new RegExp(`sent out ${escapedName}!|${escapedName} was dragged out!`, 'i');
-    const statRegex = new RegExp(`The opposing ${escapedName}'s (Attack|Defense|Sp\\. Atk|Sp\\. Def|Speed|accuracy|evasiveness) (rose|fell)( sharply| drastically| harshly| severely)?!`, 'i');
-    const bellyDrumRegex = new RegExp(`The opposing ${escapedName} cut its own HP and maximized its Attack!`, 'i');
+    const lines = history.innerText.split('\n').map(l => l.trim()).filter(Boolean).reverse();
+    const e = opponentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const teraRegex       = new RegExp(`The opposing ${e} terastallized into the ([A-Za-z]+) type`, 'i');
+    const typeChangeRegex = new RegExp(`The opposing ${e}.*type changed to ([A-Za-z]+)`, 'i');
+    const switchRegex     = new RegExp(`sent out ${e}!|${e} was dragged out!`, 'i');
+    const statRegex       = new RegExp(`The opposing ${e}'s (Attack|Defense|Sp\\. Atk|Sp\\. Def|Speed|accuracy|evasiveness) (rose|fell)( sharply| drastically| harshly| severely)?!`, 'i');
+    const bellyDrumRegex  = new RegExp(`The opposing ${e} cut its own HP and maximized its Attack!`, 'i');
 
     for (const line of lines) {
       if (!teraType) {
-        const teraMatch = line.match(teraRegex);
-        if (teraMatch) teraType = [teraMatch[1]];
+        const m = line.match(teraRegex);
+        if (m) teraType = [m[1]];
       }
-      
+
       if (!tempType && !hasSwitchedIn) {
-        const typeChangeMatch = line.match(typeChangeRegex);
-        if (typeChangeMatch) tempType = [typeChangeMatch[1]];
+        const m = line.match(typeChangeRegex);
+        if (m) tempType = [m[1]];
       }
-      
+
       if (!hasSwitchedIn) {
         const statMatch = line.match(statRegex);
         if (statMatch) {
-          const statMap = { 'attack': 'atk', 'defense': 'def', 'sp. atk': 'spa', 'sp. def': 'spd', 'speed': 'spe', 'accuracy': 'accuracy', 'evasiveness': 'evasion' };
-          const stat = statMap[statMatch[1].toLowerCase()];
+          const stat = STAT_MAP[statMatch[1].toLowerCase()];
           if (stat) {
             const isRose = statMatch[2].toLowerCase() === 'rose';
-            const severity = statMatch[3] ? statMatch[3].trim().toLowerCase() : '';
-            
-            let amount = 1;
-            if (severity === 'sharply' || severity === 'harshly') amount = 2;
-            else if (severity === 'drastically' || severity === 'severely') amount = 3;
-            
-            if (stat === 'atk' && bellyDrumSeen) {
-              // Ignore attack changes chronologically before Belly Drum
-            } else {
-              if (isRose) boosts[stat] += amount;
-              else boosts[stat] -= amount;
+            const amount = parseSeverity(statMatch[3]);
+            // Ignore atk changes logged before the Belly Drum line (reverse-order iteration)
+            if (!(stat === 'atk' && bellyDrumSeen)) {
+              boosts[stat] += isRose ? amount : -amount;
             }
           }
         }
-        
-        if (line.match(bellyDrumRegex) && !bellyDrumSeen) {
-          boosts.atk = 6 + boosts.atk;
+
+        if (!bellyDrumSeen && bellyDrumRegex.test(line)) {
+          boosts.atk = 6; // Belly Drum maximises Attack regardless of prior boosts
           bellyDrumSeen = true;
         }
       }
-      
-      if (!hasSwitchedIn && switchRegex.test(line)) {
-        hasSwitchedIn = true;
-      }
-      
-      if (teraType && tempType && hasSwitchedIn) break;
+
+      if (!hasSwitchedIn && switchRegex.test(line)) hasSwitchedIn = true;
+
+      // All three signals collected — stop scanning
+      if ((teraType || tempType) && hasSwitchedIn) break;
     }
   }
 
-  // Clamp boosts to valid ranges
-  for (let key in boosts) {
-    boosts[key] = Math.max(-6, Math.min(6, boosts[key]));
-  }
+  for (const key in boosts) boosts[key] = Math.max(-6, Math.min(6, boosts[key]));
 
-  // Get status from statbar
+  // Derive status from statbar DOM
   let status = null;
   if (bar) {
     const statusSpan = bar.querySelector('.status');
-    if (statusSpan && statusSpan.textContent.trim()) {
-      status = statusSpan.textContent.trim();
-    }
+    if (statusSpan?.textContent.trim()) status = statusSpan.textContent.trim().toUpperCase();
     const hpText = bar.querySelector('.hptext');
-    if (hpText && (hpText.textContent.trim() === '0%' || hpText.textContent.trim() === '0/0')) {
-      status = 'FNT';
+    if (hpText) {
+      const t = hpText.textContent.trim();
+      if (t === '0%' || t === '0/0') status = 'FNT';
     }
   }
-  
-  return {
-    typeOverride: teraType || tempType || null,
-    boosts: boosts,
-    status: status
-  };
+
+  return { typeOverride: teraType || tempType || null, boosts, status };
 }
 
 function getRevealedMoves(opponentName) {
   const history = document.querySelector('.battle-history, .message-log');
   if (!history) return [];
-  
-  const revealedMoves = new Set();
-  const escapedName = opponentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const moveRegex = new RegExp(`The opposing ${escapedName} used (.*)!`, 'i');
-  
-  const lines = history.innerText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  
-  for (const line of lines) {
-    const match = line.match(moveRegex);
-    if (match) {
-      revealedMoves.add(match[1]);
-    }
+  const e = opponentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const moveRegex = new RegExp(`The opposing ${e} used (.+)!`, 'i');
+  const revealed = new Set();
+  for (const line of history.innerText.split('\n')) {
+    const m = line.trim().match(moveRegex);
+    if (m) revealed.add(m[1]);
   }
-  
-  return Array.from(revealedMoves);
+  return [...revealed];
 }
 
 function getMyActiveTypes() {
-  if (!window.Pokedex) return { name: "Unknown", types: [] };
+  if (!window.Pokedex) return { name: 'Unknown', types: [] };
   const statbars = document.querySelectorAll('.statbar');
-  let myName = null;
-  
+  let rawName = null;
   for (const bar of statbars) {
-    // Look for our statbar (not rstatbar or p2)
     if (!bar.classList.contains('rstatbar') && !(bar.getAttribute('data-side') || '').startsWith('p2')) {
-      const strong = bar.querySelector('strong');
-      if (strong) {
-        let rawName = strong.textContent.trim();
-        myName = rawName.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
-      }
+      rawName = bar.querySelector('strong')?.textContent.trim() || null;
       break;
     }
   }
-  
-  let finalTypes = [];
-  if (myName) {
-    const types = window.Pokedex[myName];
-    if (types) {
-      finalTypes = types;
-    } else {
-      const normalized = myName.replace(/[^a-zA-Z0-9-]/g, '');
-      for (const key in window.Pokedex) {
-        if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
-          finalTypes = window.Pokedex[key];
-          myName = key;
-          break;
-        }
-      }
-    }
-  }
-  
-  return { name: myName || "Unknown", types: finalTypes };
+  if (!rawName) return { name: 'Unknown', types: [] };
+  const name = resolvePokedexName(rawName);
+  return { name, types: window.Pokedex[name] || [] };
 }
 
 function getOpponents() {
   if (!window.Pokedex) return [];
-  const statbars = document.querySelectorAll('.statbar');
-  let opponents = [];
-  
-  for (const bar of statbars) {
-    if (bar.classList.contains('rstatbar') || (bar.getAttribute('data-side') || '').startsWith('p2') || (bar.getAttribute('data-side') || '').startsWith('p3') || (bar.getAttribute('data-side') || '').startsWith('p4')) {
-      const strong = bar.querySelector('strong');
-      if (strong) {
-        let rawName = strong.textContent.trim();
-        let opponentName = rawName.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
-        
-        let finalTypes = [];
-        let isOverride = false;
-        let revealedMoves = getRevealedMoves(opponentName);
-        const oppState = getOpponentState(opponentName, bar);
-        
-        if (oppState.typeOverride) {
-          finalTypes = oppState.typeOverride;
-          isOverride = true;
-        } else {
-          const types = window.Pokedex[opponentName];
-          if (types) {
-            finalTypes = types;
-          } else {
-            const normalized = opponentName.replace(/[^a-zA-Z0-9-]/g, '');
-            for (const key in window.Pokedex) {
-              if (key.replace(/[^a-zA-Z0-9-]/g, '') === normalized) {
-                finalTypes = window.Pokedex[key];
-                opponentName = key;
-                break;
-              }
-            }
-          }
-        }
-        
-        opponents.push({
-          name: opponentName || "Unknown",
-          types: finalTypes,
-          isOverride: isOverride,
-          revealedMoves: revealedMoves,
-          boosts: oppState.boosts,
-          status: oppState.status
-        });
-      }
-    }
+  const opponents = [];
+  for (const bar of document.querySelectorAll('.statbar')) {
+    const side = bar.getAttribute('data-side') || '';
+    const isOppSide = bar.classList.contains('rstatbar') ||
+      side.startsWith('p2') || side.startsWith('p3') || side.startsWith('p4');
+    if (!isOppSide) continue;
+    const strong = bar.querySelector('strong');
+    if (!strong) continue;
+
+    const name = resolvePokedexName(strong.textContent.trim());
+    const oppState = getOpponentState(name, bar);
+    const types = oppState.typeOverride || window.Pokedex[name] || [];
+
+    opponents.push({
+      name,
+      types,
+      isOverride: !!oppState.typeOverride,
+      revealedMoves: getRevealedMoves(name),
+      boosts: oppState.boosts,
+      status: oppState.status,
+      hp: getOppHPPercent(bar),
+    });
   }
   return opponents;
+}
+
+// ---------------------------------------------------------------------
+// Own stat-boost tracking (reads our side of the battle log)
+// ---------------------------------------------------------------------
+function getMyBoosts(myName) {
+  const history = document.querySelector('.battle-history, .message-log');
+  const boosts = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, accuracy: 0, evasion: 0 };
+  if (!history || !myName) return boosts;
+
+  const lines = history.innerText.split('\n').map(l => l.trim()).filter(Boolean).reverse();
+  const e = myName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Our stat lines: "<Name>'s Attack rose!" (no "The opposing" prefix)
+  const statRegex      = new RegExp(`^${e}'s (Attack|Defense|Sp\\. Atk|Sp\\. Def|Speed|accuracy|evasiveness) (rose|fell)( sharply| drastically| harshly| severely)?!`, 'i');
+  const switchRegex    = /^(Go! |You sent out |Come back, )/i;
+  const bellyDrumRegex = new RegExp(`^${e} cut its own HP and maximized its Attack!`, 'i');
+  let hasSwitchedIn = false;
+
+  for (const line of lines) {
+    if (!hasSwitchedIn) {
+      if (bellyDrumRegex.test(line)) {
+        boosts.atk = 6;
+      } else {
+        const m = line.match(statRegex);
+        if (m) {
+          const stat = STAT_MAP[m[1].toLowerCase()];
+          if (stat) {
+            const isRose = m[2].toLowerCase() === 'rose';
+            boosts[stat] += isRose ? parseSeverity(m[3]) : -parseSeverity(m[3]);
+          }
+        }
+      }
+    }
+    if (!hasSwitchedIn && switchRegex.test(line)) hasSwitchedIn = true;
+    if (hasSwitchedIn) break;
+  }
+  for (const key in boosts) boosts[key] = Math.max(-6, Math.min(6, boosts[key]));
+  return boosts;
+}
+
+// ---------------------------------------------------------------------
+// Current HP tracking from the battle DOM
+// ---------------------------------------------------------------------
+function getMyHPPercent() {
+  const statbars = document.querySelectorAll('.statbar');
+  for (const bar of statbars) {
+    if (!bar.classList.contains('rstatbar') && !(bar.getAttribute('data-side') || '').startsWith('p2')) {
+      const hpText = bar.querySelector('.hptext');
+      if (hpText) {
+        const text = hpText.textContent.trim();
+        if (text.endsWith('%')) return parseFloat(text) / 100;
+        const parts = text.split('/');
+        if (parts.length === 2 && parseFloat(parts[1]) > 0)
+          return parseFloat(parts[0]) / parseFloat(parts[1]);
+      }
+      break;
+    }
+  }
+  return 1.0; // assume full HP if unreadable
+}
+
+function getOppHPPercent(bar) {
+  if (!bar) return 1.0;
+  const hpText = bar.querySelector('.hptext');
+  if (hpText) {
+    const text = hpText.textContent.trim();
+    if (text.endsWith('%')) return parseFloat(text) / 100;
+    const parts = text.split('/');
+    if (parts.length === 2 && parseFloat(parts[1]) > 0)
+      return parseFloat(parts[0]) / parseFloat(parts[1]);
+  }
+  return 1.0;
+}
+
+// ---------------------------------------------------------------------
+// Per-side entry hazard tracking (Stealth Rock, Spikes, Toxic Spikes)
+// ---------------------------------------------------------------------
+function getHazardState() {
+  const history = document.querySelector('.battle-history, .message-log');
+  if (!history) return { ourSide: false, theirSide: false, ourHazardDmg: 0, theirHazardDmg: 0 };
+  const text = history.innerText;
+
+  let ourHazardDmg = 0;
+  let theirHazardDmg = 0;
+
+  // Stealth Rock (~12.5% on neutral targets)
+  if (/pointed stones.*?your\s+(?:team|side)/i.test(text)) ourHazardDmg += 0.125;
+  if (/pointed stones.*?opposing/i.test(text)) theirHazardDmg += 0.125;
+
+  // Spikes (each layer ~1/8 HP on neutral, up to 3 layers)
+  const ourSpikes = (text.match(/Spikes were scattered all around your\s+(?:team|side)/gi) || []).length;
+  const theirSpikes = (text.match(/Spikes were scattered all around the opposing/gi) || []).length;
+  ourHazardDmg += Math.min(ourSpikes, 3) * 0.0417;
+  theirHazardDmg += Math.min(theirSpikes, 3) * 0.0417;
+
+  // Toxic Spikes (up to 2 layers)
+  const ourTSpikes = (text.match(/Toxic Spikes.*?your\s+(?:team|side)/gi) || []).length;
+  const theirTSpikes = (text.match(/Toxic Spikes.*?opposing/gi) || []).length;
+  ourHazardDmg += Math.min(ourTSpikes, 2) * 0.0313;
+  theirHazardDmg += Math.min(theirTSpikes, 2) * 0.0313;
+
+  return { ourSide: ourHazardDmg > 0, theirSide: theirHazardDmg > 0, ourHazardDmg, theirHazardDmg };
+}
+
+// ---------------------------------------------------------------------
+// Smart modifier activation (Mega, Ultra Burst, Dynamax, Tera, Z-Move)
+// ---------------------------------------------------------------------
+function shouldActivateModifier(mod, moveData, myTypes, oppTypes, estimatedPctDmg, dangerScore) {
+  switch (mod) {
+    case 'megaevo':
+    case 'ultra':
+      return true; // Always Mega / Ultra Burst — no downside
+    case 'dynamax':
+      // Don't waste Dynamax on a turn we're likely to faint before it matters
+      return dangerScore < 0.8;
+    case 'terastallize': {
+      if (!moveData || moveData.basePower === 0) return false;
+      const effectiveness = window.getEffectiveness ? window.getEffectiveness(moveData.type, oppTypes) : 1;
+      const alreadyStab = myTypes.includes(moveData.type);
+      // Tera when: huge type advantage, defensive emergency, or strong non-STAB move
+      return effectiveness >= 2 || dangerScore > 0.7 || (estimatedPctDmg >= 0.5 && !alreadyStab);
+    }
+    case 'zmove':
+      // Use Z-Move when it can nearly KO, or in desperate OHKO-or-bust situations
+      return estimatedPctDmg >= 0.7 || (dangerScore >= 1.0 && estimatedPctDmg >= 0.4);
+    default:
+      return false;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Team-preview lead selection: prefer fewest type weaknesses
+// ---------------------------------------------------------------------
+function pickTeamPreviewLead(buttons) {
+  if (!window.Pokedex || !window.getEffectiveness) return buttons[0];
+
+  const allNames = Object.keys(window.Pokedex).sort((a, b) => b.length - a.length);
+  const allTypes = ['Normal','Fire','Water','Electric','Grass','Ice','Fighting','Poison',
+                    'Ground','Flying','Psychic','Bug','Rock','Ghost','Dragon','Dark','Steel','Fairy'];
+
+  let bestBtn = buttons[0];
+  let bestScore = Infinity;
+
+  for (const btn of buttons) {
+    let pkmnName = btn.getAttribute('data-species') || btn.getAttribute('data-name') || null;
+    if (!pkmnName) {
+      const text = btn.textContent.trim();
+      for (const name of allNames) {
+        if (text.includes(name)) { pkmnName = name; break; }
+      }
+    }
+    if (!pkmnName) continue;
+
+    const pkmnTypes = window.Pokedex[pkmnName] || [];
+    if (pkmnTypes.length === 0) continue;
+
+    // Score by number of type weaknesses (fewer = better lead)
+    let weaknesses = 0;
+    for (const t of allTypes) {
+      if (window.getEffectiveness(t, pkmnTypes) > 1) weaknesses++;
+    }
+    if (weaknesses < bestScore) {
+      bestScore = weaknesses;
+      bestBtn = btn;
+    }
+  }
+
+  log(`Team Preview: selected lead with ${bestScore} type weaknesses.`);
+  return bestBtn;
 }
 
 function estimateStat(baseStat, isHp = false, boosts = 0) {
@@ -422,68 +569,62 @@ function calculateEstimatedDamage(attackerStats, defenderStats, move, attackerTy
   return damage; // Raw HP estimate
 }
 
-function getDangerScore(myTypes, myStats, oppState, oppData) {
-  if (oppState.status === 'SLP' || oppState.status === 'FRZ') return 0;
-  
+/**
+ * Estimates the worst-case damage the opponent can deal as a fraction of our max HP.
+ * @param {string[]} myTypes  - Our active Pokémon's types
+ * @param {object}  myStats  - Our base stats object (hp/def/spd used; boosts already applied by callers)
+ * @param {object}  oppState - Opponent object with {status, types, boosts}
+ * @param {object}  oppData  - Cached Showdown Pokémon data with .baseStats
+ * @param {object}  [myBoosts] - Our current stat boosts for def/spd (optional)
+ */
+function getDangerScore(myTypes, myStats, oppState, oppData, myBoosts = {}) {
+  // Sleeping/frozen opponent can't attack
+  if (oppState.status === 'SLP' || oppState.status === 'FRZ') return { score: 0, expectedType: 'Normal' };
+
+  const oppBase = oppData.baseStats || { ...DEFAULT_BASE_STATS };
+  const oppTypes = (oppState.types?.length > 0) ? oppState.types : ['Normal'];
+
+  const oppAtk = estimateStat(oppBase.atk, false, oppState.boosts?.atk ?? 0);
+  const oppSpa = estimateStat(oppBase.spa, false, oppState.boosts?.spa ?? 0);
+  // Apply our defensive boosts so a +6 Def situation correctly reduces incoming danger
+  const myDef = estimateStat(myStats.def, false, myBoosts.def ?? 0);
+  const mySpd = estimateStat(myStats.spd, false, myBoosts.spd ?? 0);
+  const myHp  = estimateStat(myStats.hp, true, 0);
+
+  const ALL_TYPES = ['Normal','Fire','Water','Electric','Grass','Ice','Fighting','Poison',
+                     'Ground','Flying','Psychic','Bug','Rock','Ghost','Dragon','Dark','Steel','Fairy'];
+
   let maxDamage = 0;
   let mostDangerousType = 'Normal';
-  let oppBase = oppData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
-  
-  let oppEstStats = {
-    atk: estimateStat(oppBase.atk, false, oppState.boosts.atk),
-    spa: estimateStat(oppBase.spa, false, oppState.boosts.spa),
-  };
-  
-  let myEstStats = {
-    def: estimateStat(myStats.def, false, 0), // Ignoring our boosts for now for danger score simplicity
-    spd: estimateStat(myStats.spd, false, 0),
-  };
 
-  // Estimate max damage opponent can do assuming they have a STAB move of their type with 90 BP
-  // AND check coverage moves of all types at 80 BP
-  const allTypes = ['Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison', 'Ground', 'Flying', 'Psychic', 'Bug', 'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy'];
-  const oppTypes = oppState.types && oppState.types.length > 0 ? oppState.types : ['Normal'];
-  
-  for (const testType of allTypes) {
-    let isStab = oppTypes.includes(testType);
-    let bp = isStab ? 90 : 80;
-    let stabMultiplier = isStab ? 1.5 : 1.0;
-    
-    for (const cat of ['Physical', 'Special']) {
-      const effect = window.getEffectiveness ? window.getEffectiveness(testType, myTypes) : 1;
-      let atk = cat === 'Physical' ? oppEstStats.atk : oppEstStats.spa;
-      let def = cat === 'Physical' ? myEstStats.def : myEstStats.spd;
-      let dmg = ((((42 * atk * bp) / def) / 50) + 2) * stabMultiplier * effect;
-      if (dmg > maxDamage) {
-          maxDamage = dmg;
-          mostDangerousType = testType;
-      }
+  for (const testType of ALL_TYPES) {
+    const isStab = oppTypes.includes(testType);
+    const bp = isStab ? 90 : 80;
+    const stabMult = isStab ? 1.5 : 1.0;
+    const effect = window.getEffectiveness ? window.getEffectiveness(testType, myTypes) : 1;
+    if (effect === 0) continue; // type immunity — skip
+
+    for (const [atk, def] of [[oppAtk, myDef], [oppSpa, mySpd]]) {
+      const dmg = (((42 * atk * bp) / def / 50) + 2) * stabMult * effect;
+      if (dmg > maxDamage) { maxDamage = dmg; mostDangerousType = testType; }
     }
   }
-  
-  // Convert damage to a % of our estimated HP
-  let myHp = estimateStat(myStats.hp, true, 0);
-  let percentDamage = maxDamage / myHp;
-  
-  return { score: percentDamage, expectedType: mostDangerousType };
+
+  return { score: maxDamage / myHp, expectedType: mostDangerousType };
 }
 
 function getRandomAction(moveButtons, switchButtons) {
-  let all = [];
-  if (moveButtons) all.push(...moveButtons);
-  if (switchButtons) all.push(...switchButtons);
+  const all = [...(moveButtons || []), ...(switchButtons || [])];
   if (all.length === 0) return null;
-  const btn = all[Math.floor(Math.random() * all.length)];
-  return { btn, type: moveButtons && moveButtons.includes(btn) ? 'move' : 'switch' };
+  const btn = randomChoice(all);
+  return { btn, type: (moveButtons || []).includes(btn) ? 'move' : 'switch' };
 }
 
 function getBestAction(moveButtons, switchButtons) {
-  if (intelligenceLevel === 'random') {
-    return getRandomAction(moveButtons, switchButtons);
-  } else if (intelligenceLevel === 'max') {
-    return getMaxIntelligenceAction(moveButtons, switchButtons);
-  } else {
-    return getHeuristicAction(moveButtons, switchButtons);
+  switch (intelligenceLevel) {
+    case 'random':  return getRandomAction(moveButtons, switchButtons);
+    case 'max':     return getMaxIntelligenceAction(moveButtons, switchButtons);
+    default:        return getHeuristicAction(moveButtons, switchButtons);
   }
 }
 
@@ -502,11 +643,15 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
 
   if (missingOpps.length > 0 || missingMoves.length > 0 || !cachedOppData[myData.name]) return null;
 
+  const myBoosts = getMyBoosts(myData.name);
+  const myHPPercent = getMyHPPercent();
   let myStats = {
     hp: estimateStat(myBaseStats.hp, true, 0),
-    def: estimateStat(myBaseStats.def, false, 0),
-    spd: estimateStat(myBaseStats.spd, false, 0),
-    spe: estimateStat(myBaseStats.spe, false, 0)
+    atk: estimateStat(myBaseStats.atk, false, myBoosts.atk),
+    def: estimateStat(myBaseStats.def, false, myBoosts.def),
+    spa: estimateStat(myBaseStats.spa, false, myBoosts.spa),
+    spd: estimateStat(myBaseStats.spd, false, myBoosts.spd),
+    spe: estimateStat(myBaseStats.spe, false, myBoosts.spe)
   };
   
   let opp = opponents.find(o => o.status !== 'FNT' && o.status !== 'fnt') || opponents[0];
@@ -514,16 +659,17 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
   
   let oppData = cachedOppData[opp.name] || {};
   let oppBase = oppData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
+  const oppBoosts = opp.boosts || {};
   let oppStats = {
-    hp: estimateStat(oppBase.hp, true, 0),
-    def: estimateStat(oppBase.def, false, opp.boosts.def),
-    spd: estimateStat(oppBase.spd, false, opp.boosts.spd),
-    spe: estimateStat(oppBase.spe, false, opp.boosts.spe)
+    hp:  estimateStat(oppBase.hp,  true,  0),
+    def: estimateStat(oppBase.def, false, oppBoosts.def ?? 0),
+    spd: estimateStat(oppBase.spd, false, oppBoosts.spd ?? 0),
+    spe: estimateStat(oppBase.spe, false, oppBoosts.spe ?? 0),
   };
-  if (opp.status === 'PAR') oppStats.spe /= 2;
-  
+  if (opp.status === 'PAR') oppStats.spe *= 0.5;
+
   let amISlower = myStats.spe < oppStats.spe;
-  let dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData);
+  let dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData, myBoosts);
   let maxDangerScore = dangerResult.score;
   let predictedAttack = dangerResult.expectedType;
 
@@ -539,7 +685,7 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
     if (moveData.category === 'Status') {
       moveScore = 10;
       if (['Thunder Wave', 'Will-O-Wisp', 'Toxic', 'Spore'].includes(moveName) && !opp.status) moveScore = 150;
-      if (['Roost', 'Recover', 'Soft-Boiled'].includes(moveName) && maxDangerScore > 0.4 && maxDangerScore < 0.8) moveScore = 180;
+      if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis', 'Moonlight'].includes(moveName) && myHPPercent < 0.5 && maxDangerScore < 0.8) moveScore = 180 + (1 - myHPPercent) * 100;
       if (['Swords Dance', 'Nasty Plot', 'Dragon Dance'].includes(moveName) && maxDangerScore < 0.3) moveScore = 200;
     } else {
       let damage = calculateEstimatedDamage(myStats, oppStats, moveData, myData.types, opp.types);
@@ -550,7 +696,8 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
       moveScore *= (acc / 100);
       
       if (!amISlower || moveData.priority > 0) {
-        if (percentDamage >= 1.0) moveScore += 1000;
+        // Use actual current HP for KO detection, not always 100%
+        if (percentDamage >= (opp.hp !== undefined ? opp.hp : 1.0)) moveScore += 1000;
         else moveScore -= (maxDangerScore * 100);
       } else {
         if (maxDangerScore >= 1.0) moveScore = -1000;
@@ -565,8 +712,8 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
   }
   
   // Evaluate Switches
-  const historyText = (document.querySelector('.battle-history, .message-log') || {}).innerText || "";
-  let hazardsUp = historyText.includes('pointed stones') || historyText.includes('Spikes');
+  const hazardState = getHazardState();
+  const switchHazardPenalty = hazardState.ourHazardDmg; // exact fraction, not flat 0.125
   
   const allNames = window.Pokedex ? Object.keys(window.Pokedex).sort((a, b) => b.length - a.length) : [];
   for (const btn of switchButtons) {
@@ -589,8 +736,8 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
        else if (effect < 1) incDanger -= 0.5;
        else if (effect > 1) incDanger += 0.5;
     }
-    if (hazardsUp) incDanger += 0.125;
-    
+    incDanger += switchHazardPenalty;
+
     let switchScore = -(incDanger * 100);
     if (maxDangerScore >= 1.0 && incDanger < 0.5) switchScore += 500;
     
@@ -636,13 +783,15 @@ function getHeuristicAction(moveButtons, switchButtons) {
     return null; // wait
   }
   
+  const myBoosts = getMyBoosts(myData.name);
+  const myHPPercent = getMyHPPercent();
   let myStats = {
     hp: estimateStat(myBaseStats.hp, true, 0),
-    atk: estimateStat(myBaseStats.atk, false, 0), // TODO: parse our own boosts from DOM?
-    def: estimateStat(myBaseStats.def, false, 0),
-    spa: estimateStat(myBaseStats.spa, false, 0),
-    spd: estimateStat(myBaseStats.spd, false, 0),
-    spe: estimateStat(myBaseStats.spe, false, 0)
+    atk: estimateStat(myBaseStats.atk, false, myBoosts.atk),
+    def: estimateStat(myBaseStats.def, false, myBoosts.def),
+    spa: estimateStat(myBaseStats.spa, false, myBoosts.spa),
+    spd: estimateStat(myBaseStats.spd, false, myBoosts.spd),
+    spe: estimateStat(myBaseStats.spe, false, myBoosts.spe)
   };
   
   let maxDangerScore = 0; // percent damage we take
@@ -654,16 +803,16 @@ function getHeuristicAction(moveButtons, switchButtons) {
     for (const opp of opponents) {
       if (opp.status === 'FNT' || opp.status === 'fnt') continue;
       
-      let oppData = cachedOppData[opp.name] || {};
-      let dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData);
-      let dangerScore = dangerResult.score;
+      const oppData = cachedOppData[opp.name] || {};
+      const dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData, myBoosts);
+      const dangerScore = dangerResult.score;
       if (dangerScore > maxDangerScore) {
         maxDangerScore = dangerScore;
         predictedAttack = dangerResult.expectedType;
         oppToWorryAbout = opp;
-        let oppBaseSpe = (oppData.baseStats && oppData.baseStats.spe) || 100;
-        oppSpeed = estimateStat(oppBaseSpe, false, opp.boosts.spe);
-        if (opp.status === 'PAR') oppSpeed /= 2;
+        const oppBaseSpe = oppData.baseStats?.spe ?? 100;
+        oppSpeed = estimateStat(oppBaseSpe, false, opp.boosts?.spe ?? 0);
+        if (opp.status === 'PAR') oppSpeed *= 0.5;
       }
     }
   }
@@ -696,10 +845,11 @@ function getHeuristicAction(moveButtons, switchButtons) {
         let oppData = cachedOppData[opp.name] || {};
         let oppBase = oppData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
         
-        let oppStats = {
-          hp: estimateStat(oppBase.hp, true, 0),
-          def: estimateStat(oppBase.def, false, opp.boosts.def),
-          spd: estimateStat(oppBase.spd, false, opp.boosts.spd),
+        const ob = opp.boosts || {};
+        const oppStats = {
+          hp:  estimateStat(oppBase.hp,  true,  0),
+          def: estimateStat(oppBase.def, false, ob.def ?? 0),
+          spd: estimateStat(oppBase.spd, false, ob.spd ?? 0),
         };
         
         let moveScore = 0;
@@ -723,16 +873,24 @@ function getHeuristicAction(moveButtons, switchButtons) {
                    moveScore = 5; // Unsafe to setup
                }
            }
-           else if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis'].includes(moveName)) {
-               // If taking moderate damage but we can heal it off
-               if (maxDangerScore > 0.4 && maxDangerScore < 0.6) {
-                   moveScore = 180;
+           else if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis', 'Moonlight'].includes(moveName)) {
+               // Heal if we're below half HP and won't be OHKOd before we can act
+               if (myHPPercent < 0.5 && maxDangerScore < 0.8) {
+                   moveScore = 180 + (1 - myHPPercent) * 100; // More urgent the lower our HP
                } else {
                    moveScore = 5;
                }
            }
            else if (['Stealth Rock', 'Spikes', 'Toxic Spikes'].includes(moveName)) {
-               moveScore = 140; // Good early game
+               // Hazards are less useful if opponent's side already has them
+               moveScore = hazardState.theirSide ? 20 : 140;
+           }
+           else if (['Wish', 'Healing Wish', 'Lunar Dance'].includes(moveName)) {
+               moveScore = myHPPercent < 0.4 ? 160 : 30;
+           }
+           else if (moveName === 'Trick Room') {
+               // Trick Room is valuable when we're slower than the opponent
+               moveScore = amISlower ? 180 : 5;
            }
            else {
                moveScore = 10; // Generic status move
@@ -744,8 +902,8 @@ function getHeuristicAction(moveButtons, switchButtons) {
            
            moveScore = percentDamage * 100; // Base score is % damage dealt
            
-           // Priority bonus if we are slower and can KO
-           if (moveData.priority > 0 && percentDamage >= 1.0) {
+           // Priority bonus if we are slower and can KO (use actual current HP, not just 100%)
+           if (moveData.priority > 0 && percentDamage >= (opp.hp !== undefined ? opp.hp : 1.0)) {
                moveScore += 500; // Almost definitely do this
            }
            
@@ -800,9 +958,8 @@ function getHeuristicAction(moveButtons, switchButtons) {
   let bestSwitchBtns = [];
   let bestSwitchDanger = 999;
   
-  // Basic Hazard Check - read the battle text for stealth rock
-  const historyText = (document.querySelector('.battle-history, .message-log') || {}).innerText || "";
-  let hazardsUp = historyText.includes('pointed stones') || historyText.includes('Spikes');
+  const hazardState = getHazardState();
+  const switchHazardPenalty = hazardState.ourHazardDmg;
   
   if (moveButtons.length === 0 || (maxDangerScore >= 1.0 && amISlower)) { // If about to be OHKO'd before we can move
     log(`Danger score ${Math.round(maxDangerScore*100)}%, moves=${moveButtons.length}. Evaluating switches...`);
@@ -845,9 +1002,7 @@ function getHeuristicAction(moveButtons, switchButtons) {
             if (danger > incomingDanger) incomingDanger = danger;
         }
       }
-      
-      // Add a penalty to incomingDanger if hazards are up (pseudo 12.5% damage added)
-      if (hazardsUp) incomingDanger += 0.125;
+      incomingDanger += switchHazardPenalty;
       
       if (incomingDanger < bestSwitchDanger) {
         bestSwitchDanger = incomingDanger;
@@ -880,9 +1035,8 @@ function getHeuristicAction(moveButtons, switchButtons) {
   }
   
   if (moveButtons.length > 0) return { btn: moveButtons[0], type: 'move' };
-  if (switchButtons.length > 0) return { btn: switchButtons[0], type: 'switch' };
-
-  return { btn: switchButtons[0], type: 'switch' }; // Fallback
+  if (switchButtons.length > 0) return { btn: randomChoice(switchButtons), type: 'switch' };
+  return null; // No valid action available
 }
 
 
@@ -953,14 +1107,37 @@ function evaluateAndAct() {
     let category = "";
 
     if (target.buttons.length > 0) {
-      chosen = randomChoice(target.buttons);
+      // FFA/doubles: prefer intended target, then fall back to lowest-HP target (easiest KO)
+      chosen = null;
       if (window.lastIntendedTarget) {
-          for (const btn of target.buttons) {
-              if (btn.textContent.includes(window.lastIntendedTarget)) {
-                  chosen = btn;
-                  break;
-              }
+        for (const btn of target.buttons) {
+          if (btn.textContent.includes(window.lastIntendedTarget)) {
+            chosen = btn;
+            break;
           }
+        }
+      }
+      if (!chosen) {
+        let lowestHP = Infinity;
+        const oppBars = document.querySelectorAll(
+          '.rstatbar, .statbar[data-side^="p2"], .statbar[data-side^="p3"], .statbar[data-side^="p4"]'
+        );
+        for (const btn of target.buttons) {
+          const btnText = btn.textContent.trim();
+          for (const bar of oppBars) {
+            const nameEl = bar.querySelector('strong');
+            if (nameEl) {
+              const barName = nameEl.textContent.replace(/\s*L\d+.*$/i, '').replace(/[\u2640\u2642]/g, '').trim();
+              if (btnText.includes(barName)) {
+                const hp = getOppHPPercent(bar);
+                if (hp < lowestHP) { lowestHP = hp; chosen = btn; }
+                break;
+              }
+            }
+          }
+        }
+        if (!chosen) chosen = randomChoice(target.buttons);
+        log(`FFA target selected: lowest HP at ~${Math.round(lowestHP * 100)}%`);
       }
       category = 'target';
     } else if (move.buttons.length > 0 || switches.buttons.length > 0) {
@@ -969,7 +1146,7 @@ function evaluateAndAct() {
       chosen = action.btn;
       category = action.type;
     } else if (teamPreview.buttons.length > 0) {
-      chosen = teamPreview.buttons[0];
+      chosen = pickTeamPreviewLead(teamPreview.buttons);
       category = `teampreview (via ${teamPreview.selectorUsed})`;
     }
 
@@ -985,12 +1162,48 @@ function evaluateAndAct() {
     setTimeout(() => {
       try {
         if (category === 'move') {
-          const modifiers = ['terastallize', 'megaevo', 'zmove', 'dynamax', 'ultra'];
+          // Gather context for smart per-modifier decisions
+          const moveName = chosen ? chosen.getAttribute('data-move') : null;
+          const moveData = moveName ? (cachedMoveData[moveName] || null) : null;
+          const myInfo = getMyActiveTypes();
+          const opps = getOpponents();
+          const firstOpp = opps.find(o => o.status !== 'FNT' && o.status !== 'fnt') || opps[0];
+          const oppTypes = firstOpp ? firstOpp.types : [];
+          const myTypes = myInfo.types;
+
+          let pctDmg = 0;
+          let dangerScore = 0;
+          if (moveData && firstOpp) {
+            const myBase = (cachedOppData[myInfo.name] || {}).baseStats || { atk: 100, spa: 100, def: 100, spd: 100, hp: 100, spe: 100 };
+            const oppBase = (cachedOppData[firstOpp.name] || {}).baseStats || { hp: 100, def: 100, spd: 100 };
+            const myAtkStat = moveData.category === 'Physical'
+              ? estimateStat(myBase.atk, false, 0)
+              : estimateStat(myBase.spa, false, 0);
+            const oppDefStat = moveData.category === 'Physical'
+              ? estimateStat(oppBase.def, false, firstOpp.boosts ? firstOpp.boosts.def : 0)
+              : estimateStat(oppBase.spd, false, firstOpp.boosts ? firstOpp.boosts.spd : 0);
+            const oppHpStat = estimateStat(oppBase.hp, true, 0);
+            const bp = moveData.basePower || 0;
+            if (bp > 0) {
+              const stab = myTypes.includes(moveData.type) ? 1.5 : 1;
+              const eff = window.getEffectiveness ? window.getEffectiveness(moveData.type, oppTypes) : 1;
+              pctDmg = (((42 * myAtkStat * bp) / oppDefStat / 50) + 2) * stab * eff / oppHpStat;
+            }
+            const myBaseForDanger = (cachedOppData[myInfo.name] || {}).baseStats ||
+              { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 100 };
+            dangerScore = getDangerScore(myTypes, myBaseForDanger, firstOpp,
+              cachedOppData[firstOpp.name] || {}).score;
+          }
+
+          // Activate in priority order: Mega first (no downside), then conditional ones
+          const modifiers = ['megaevo', 'ultra', 'dynamax', 'terastallize', 'zmove'];
           for (const mod of modifiers) {
             const cb = document.querySelector(`input[name="${mod}"]`);
             if (cb && !cb.checked) {
-              cb.click();
-              log(`Activated ${mod}!`);
+              if (shouldActivateModifier(mod, moveData, myTypes, oppTypes, pctDmg, dangerScore)) {
+                cb.click();
+                log(`Activated ${mod}! (pctDmg=${Math.round(pctDmg * 100)}%, danger=${Math.round(dangerScore * 100)}%)`);
+              }
             }
           }
         }
@@ -1020,31 +1233,38 @@ function scheduleEvaluate() {
   });
 }
 
+// intelligenceLevel must be declared BEFORE the observer/poll start so the first
+// synchronous evaluateAndAct() call (triggered by mutations during page load) uses
+// the correct value even before the async storage.get resolves.
+let intelligenceLevel = 'max';
+
 const observer = new MutationObserver(() => scheduleEvaluate());
 observer.observe(document.body, { childList: true, subtree: true });
 pollInterval = setInterval(evaluateAndAct, 1000);
 
-let intelligenceLevel = 'max';
-
+// Initialise from persisted settings (async)
 chrome.storage.local.get({ enabled: false, intelligence: 'max' }, (data) => {
+  if (chrome.runtime.lastError) {
+    console.warn('[ShowdownTestBot] Could not read settings:', chrome.runtime.lastError.message);
+    return;
+  }
   enabled = data.enabled;
   intelligenceLevel = data.intelligence;
-  log(`Content script loaded. Enabled=${enabled}, Intelligence=${intelligenceLevel}`);
+  log(`Content script loaded. enabled=${enabled}, intelligence=${intelligenceLevel}`);
   evaluateAndAct();
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local") {
-    if (changes.enabled) {
-      enabled = changes.enabled.newValue;
-      log(`Toggled ${enabled ? "ON" : "OFF"}`);
-      lastActedSignature = null;
-      lastFoundAnyAt = Date.now();
-    }
-    if (changes.intelligence) {
-      intelligenceLevel = changes.intelligence.newValue;
-      log(`Intelligence changed to ${intelligenceLevel}`);
-    }
-    evaluateAndAct();
+  if (area !== 'local') return;
+  if (changes.enabled) {
+    enabled = changes.enabled.newValue;
+    log(`Toggled ${enabled ? 'ON' : 'OFF'}`);
+    lastActedSignature = null;
+    lastFoundAnyAt = Date.now();
   }
+  if (changes.intelligence) {
+    intelligenceLevel = changes.intelligence.newValue;
+    log(`Intelligence changed to ${intelligenceLevel}`);
+  }
+  evaluateAndAct();
 });
