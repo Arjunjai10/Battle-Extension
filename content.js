@@ -162,6 +162,10 @@ function randomChoice(list) {
   return list[Math.floor(Math.random() * list.length)];
 }
 
+function isFainted(status) {
+  return status === 'fnt' || status === 'FNT';
+}
+
 function signatureFor(buttons) {
   return buttons.map((b) => b.outerHTML).join("|");
 }
@@ -549,24 +553,106 @@ function estimateStat(baseStat, isHp = false, boosts = 0) {
 }
 
 function calculateEstimatedDamage(attackerStats, defenderStats, move, attackerTypes, defenderTypes) {
-  let bp = move.basePower || 0;
+  const bp = move.basePower || 0;
   if (bp === 0) return 0;
-  
-  let atk = move.category === 'Physical' ? attackerStats.atk : attackerStats.spa;
-  let def = move.category === 'Physical' ? defenderStats.def : defenderStats.spd;
-  
-  // Level 100 formula
-  let damage = ((((42 * atk * bp) / def) / 50) + 2);
-  
-  // STAB
-  let stab = attackerTypes.includes(move.type) ? 1.5 : 1;
-  damage *= stab;
-  
-  // Effectiveness
-  let effect = window.getEffectiveness ? window.getEffectiveness(move.type, defenderTypes) : 1;
-  damage *= effect;
-  
-  return damage; // Raw HP estimate
+
+  // Hard zero for type immunities — this prevents the bot from ever selecting
+  // a move that literally cannot hit (e.g. Fighting vs Ghost, Psychic vs Dark,
+  // Electric vs Ground, Normal vs Ghost, Ground vs Flying without Gravity).
+  const effect = window.getEffectiveness ? window.getEffectiveness(move.type, defenderTypes) : 1;
+  if (effect === 0) return 0;
+
+  const atk = move.category === 'Physical' ? attackerStats.atk : attackerStats.spa;
+  const def = move.category === 'Physical' ? defenderStats.def : defenderStats.spd;
+
+  // Standard Gen-9 damage formula at Lv100
+  let damage = (((42 * atk * bp) / def) / 50) + 2;
+  damage *= attackerTypes.includes(move.type) ? 1.5 : 1; // STAB
+  damage *= effect;                                        // Type effectiveness
+  return damage;
+}
+
+// ---------------------------------------------------------------------
+// Battle-state awareness helpers (derived from history text)
+// ---------------------------------------------------------------------
+
+/** Returns true if the currently active opponent is behind a Substitute. */
+function hasOpponentSubstitute(oppName) {
+  const history = document.querySelector('.battle-history, .message-log');
+  if (!history || !oppName) return false;
+  const e = oppName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lines = history.innerText.split('\n').map(l => l.trim()).filter(Boolean).reverse();
+
+  for (const line of lines) {
+    // Substitute was broken
+    if (new RegExp(`The opposing ${e}.*substitute faded`, 'i').test(line)) return false;
+    // A new substitute was created
+    if (new RegExp(`The opposing ${e} put in a substitute`, 'i').test(line)) return true;
+    // Opponent switched — no more sub
+    if (new RegExp(`sent out ${e}!`, 'i').test(line)) return false;
+    // We switched — sub may still be up
+  }
+  return false;
+}
+
+/**
+ * Returns the number of consecutive turns the given opponent has used
+ * a recovery/stall move (Roost, Recover, Substitute, etc.) since we last
+ * dealt damage to them.  Used to detect recovery-stall loops.
+ */
+function getOpponentRecoveryTurns(oppName) {
+  const history = document.querySelector('.battle-history, .message-log');
+  if (!history || !oppName) return 0;
+  const e = oppName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const RECOVERY_MOVES = /roost|recover|soft-boiled|moonlight|synthesis|rest|slack off|morning sun|healing wish|wish|lunar dance|substitute/i;
+  const lines = history.innerText.split('\n').map(l => l.trim()).filter(Boolean).reverse();
+  let count = 0;
+  for (const line of lines) {
+    if (new RegExp(`The opposing ${e} used`, 'i').test(line)) {
+      if (RECOVERY_MOVES.test(line)) { count++; continue; }
+      break; // Opponent used a non-recovery move — streak ends
+    }
+    // Damage we dealt breaks the streak
+    if (new RegExp(`The opposing ${e} lost`, 'i').test(line)) break;
+  }
+  return count;
+}
+
+/**
+ * Returns true if this Pokémon's entire revealed move set consists of
+ * hazard-setting moves, making it a dedicated hazard setter to eliminate ASAP.
+ */
+function isOpponentHazardSetter(opp) {
+  if (!opp.revealedMoves || opp.revealedMoves.length === 0) return false;
+  const HAZARD_MOVES = new Set(['Stealth Rock', 'Spikes', 'Toxic Spikes', 'Sticky Web', 'Ceaseless Edge', 'Stone Axe']);
+  return opp.revealedMoves.every(m => HAZARD_MOVES.has(m));
+}
+
+/**
+ * Returns the estimated per-turn poison/burn chip a Pokémon will take if
+ * switched in (based on our side's Toxic Spikes layers and their status).
+ * Used to penalise switching in an already-statused Pokémon.
+ */
+function estimateSwitchStatusCost(btnText, hazardState) {
+  // If Toxic Spikes are up, any incoming grounded non-Poison/Steel will get poisoned
+  // and take 1/8 per turn (regular) or escalating damage (badly poisoned).
+  // We approximate: 1 layer = 1/8 per turn, 2 layers = 1/6 per turn chip on top of hazard.
+  // This is already captured in switchHazardPenalty; here we add recurring poison cost
+  // for Pokémon that are ALREADY poisoned/burned (they pay it every turn they're in).
+  // We detect this from the button text (Showdown shows status icons on switch buttons).
+  const isBadlyPoisoned = /psn|tox/i.test(btnText);
+  const isBurned        = /brn/i.test(btnText);
+  if (isBadlyPoisoned) return 0.125; // ~1/8 recurring per turn
+  if (isBurned)        return 0.0625;
+  return 0;
+}
+
+/** Returns true if the last move this turn was a setup/Shell-Smash move. */
+let _lastSetupTurn = -1; // Turn number when we last used a setup move
+let _turnCounter = 0;    // Incremented each time evaluateAndAct fires a click
+
+function usedSetupThisTurn() {
+  return _lastSetupTurn >= _turnCounter - 1;
 }
 
 /**
@@ -629,6 +715,7 @@ function getBestAction(moveButtons, switchButtons) {
 }
 
 function getMaxIntelligenceAction(moveButtons, switchButtons) {
+  // --- 1. Gather Battle State ---
   const myData = getMyActiveTypes();
   const opponents = getOpponents();
   
@@ -668,89 +755,138 @@ function getMaxIntelligenceAction(moveButtons, switchButtons) {
   };
   if (opp.status === 'PAR') oppStats.spe *= 0.5;
 
-  let amISlower = myStats.spe < oppStats.spe;
-  let dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData, myBoosts);
-  let maxDangerScore = dangerResult.score;
-  let predictedAttack = dangerResult.expectedType;
-
-  let bestAction = null;
-  let bestScore = -9999;
-  
-  // Evaluate Moves
-  for (const btn of moveButtons) {
-    const moveName = btn.getAttribute('data-move');
-    const moveData = cachedMoveData[moveName] || { basePower: 0, category: 'Status', type: 'Normal', priority: 0, accuracy: 100 };
-    let moveScore = 0;
-    
-    if (moveData.category === 'Status') {
-      moveScore = 10;
-      if (['Thunder Wave', 'Will-O-Wisp', 'Toxic', 'Spore'].includes(moveName) && !opp.status) moveScore = 150;
-      if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis', 'Moonlight'].includes(moveName) && myHPPercent < 0.5 && maxDangerScore < 0.8) moveScore = 180 + (1 - myHPPercent) * 100;
-      if (['Swords Dance', 'Nasty Plot', 'Dragon Dance'].includes(moveName) && maxDangerScore < 0.3) moveScore = 200;
-    } else {
-      let damage = calculateEstimatedDamage(myStats, oppStats, moveData, myData.types, opp.types);
-      let percentDamage = damage / oppStats.hp;
-      moveScore = percentDamage * 100;
-      
-      let acc = moveData.accuracy === true ? 100 : moveData.accuracy;
-      moveScore *= (acc / 100);
-      
-      if (!amISlower || moveData.priority > 0) {
-        // Use actual current HP for KO detection, not always 100%
-        if (percentDamage >= (opp.hp !== undefined ? opp.hp : 1.0)) moveScore += 1000;
-        else moveScore -= (maxDangerScore * 100);
-      } else {
-        if (maxDangerScore >= 1.0) moveScore = -1000;
-        else moveScore -= (maxDangerScore * 100);
-      }
-    }
-    
-    if (moveScore > bestScore) {
-      bestScore = moveScore;
-      bestAction = { btn: btn, type: 'move' };
-    }
-  }
-  
-  // Evaluate Switches
+  // --- 2. Advanced Decision Engine: Simulator ---
   const hazardState = getHazardState();
-  const switchHazardPenalty = hazardState.ourHazardDmg; // exact fraction, not flat 0.125
-  
+  let dangerResult = getDangerScore(myData.types, myBaseStats, opp, oppData, myBoosts);
+  const oppExpectedMoves = [
+    { name: 'Assumed STAB', basePower: 90, type: (opp.types && opp.types.length > 0) ? opp.types[0] : 'Normal', category: oppBase.atk > oppBase.spa ? 'Physical' : 'Special', priority: 0, accuracy: 100 },
+    { name: 'Assumed Coverage', basePower: 80, type: dangerResult.expectedType || 'Normal', category: oppBase.atk > oppBase.spa ? 'Physical' : 'Special', priority: 0, accuracy: 100 }
+  ];
+
+  function simulate1Ply(myAction, oppMoveAssumed) {
+      let myEndHp = myStats.hp * myHPPercent; 
+      let oppEndHp = oppStats.hp * (opp.hp !== undefined ? opp.hp : 1.0);
+      let oppEndStatus = opp.status;
+      
+      let iGoFirst = myStats.spe > oppStats.spe;
+      if (myAction.type === 'move') {
+          let myPrio = myAction.moveData.priority || 0;
+          let oppPrio = oppMoveAssumed.priority || 0;
+          if (myPrio > oppPrio) iGoFirst = true;
+          else if (myPrio < oppPrio) iGoFirst = false;
+      } else {
+          iGoFirst = true;
+      }
+
+      function resolveMyAction() {
+          if (myAction.type === 'switch') return;
+          let m = myAction.moveData;
+          if (m.category === 'Status') {
+              if (!oppEndStatus) {
+                 if (['Spore', 'Sleep Powder'].includes(m.name) && !opp.types.includes('Grass')) oppEndStatus = 'SLP';
+                 if (m.name === 'Will-O-Wisp' && !opp.types.includes('Fire')) oppEndStatus = 'BRN';
+                 if (m.name === 'Thunder Wave' && !opp.types.includes('Ground') && !opp.types.includes('Electric')) oppEndStatus = 'PAR';
+                 if (m.name === 'Toxic' && !opp.types.includes('Steel') && !opp.types.includes('Poison')) oppEndStatus = 'TOX';
+              }
+              if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis', 'Moonlight', 'Slack Off', 'Morning Sun'].includes(m.name)) myEndHp = Math.min(myStats.hp, myEndHp + myStats.hp * 0.5);
+          } else {
+              let dmg = calculateEstimatedDamage(myStats, oppStats, m, myData.types, opp.types);
+              let acc = m.accuracy === true ? 100 : (m.accuracy || 100);
+              if (m.name === 'Sucker Punch') acc = 40; // Penalize heavily to account for risk of failure against non-attacks
+              dmg = dmg * (acc / 100);
+              oppEndHp = Math.max(0, oppEndHp - dmg);
+          }
+      }
+
+      function resolveOppAction() {
+          let dmg = calculateEstimatedDamage(oppStats, myStats, oppMoveAssumed, opp.types, myData.types);
+          myEndHp = Math.max(0, myEndHp - dmg);
+      }
+
+      if (iGoFirst) {
+          resolveMyAction();
+          if (oppEndHp > 0) resolveOppAction();
+      } else {
+          resolveOppAction();
+          if (myEndHp > 0) resolveMyAction();
+      }
+
+      // --- 3. Evaluate Resulting State ---
+      let myScore = (myEndHp / myStats.hp) * 100;
+      let oppScore = (oppEndHp / oppStats.hp) * 100;
+      
+      if (myEndHp <= 0) myScore -= 200; 
+      if (oppEndHp <= 0) myScore += 150; 
+      
+      if (oppEndStatus && oppEndStatus !== opp.status) oppScore -= 30; 
+      
+      if (myAction.type === 'move') {
+          const mName = myAction.moveData.name;
+          if (['Swords Dance', 'Nasty Plot', 'Dragon Dance', 'Quiver Dance', 'Calm Mind', 'Bulk Up', 'Shell Smash'].includes(mName)) {
+              let relevantBoost = 0;
+              if (['Swords Dance', 'Dragon Dance', 'Bulk Up'].includes(mName)) relevantBoost = myBoosts.atk || 0;
+              else relevantBoost = myBoosts.spa || 0;
+
+              if (relevantBoost < 2 && myEndHp > myStats.hp * 0.5) {
+                  myScore += 40;
+              } else {
+                  myScore -= 100;
+              }
+          }
+      }
+      
+      if (myAction.type === 'move' && myAction.moveData.category === 'Status' && !oppEndStatus && !['Roost', 'Recover', 'Soft-Boiled', 'Synthesis', 'Moonlight', 'Slack Off', 'Morning Sun', 'Swords Dance', 'Nasty Plot', 'Dragon Dance', 'Quiver Dance', 'Calm Mind', 'Bulk Up', 'Shell Smash', 'Substitute', 'Protect'].includes(myAction.moveData.name)) {
+         myScore -= 100;
+      }
+
+      return myScore - oppScore;
+  }
+
+  // --- 4. Cross-Calculation (Minimax) ---
+  let bestAction = null;
+  let bestScore = -Infinity;
+
+  for (const btn of moveButtons) {
+     const moveName = btn.getAttribute('data-move');
+     const moveData = cachedMoveData[moveName] || { name: moveName, basePower: 0, category: 'Status', type: 'Normal', priority: 0, accuracy: 100 };
+     let myAction = { btn, type: 'move', moveData };
+     
+     let worstCaseScore = Infinity;
+     for (const oppMove of oppExpectedMoves) {
+         let score = simulate1Ply(myAction, oppMove);
+         if (score < worstCaseScore) worstCaseScore = score;
+     }
+     
+     if (hasOpponentSubstitute(opp.name) || getOpponentRecoveryTurns(opp.name) >= 3) worstCaseScore += 50;
+     if (isOpponentHazardSetter(opp)) worstCaseScore += 30;
+
+     if (worstCaseScore > bestScore) {
+         bestScore = worstCaseScore;
+         bestAction = myAction;
+     }
+  }
+
   const allNames = window.Pokedex ? Object.keys(window.Pokedex).sort((a, b) => b.length - a.length) : [];
   for (const btn of switchButtons) {
-    if (btn.disabled || btn.classList.contains('disabled')) continue;
-    if (btn.textContent.includes('fainted')) continue;
-    
-    let pkmnName = btn.textContent.trim();
-    for (const name of allNames) {
-      if (pkmnName.includes(name)) { pkmnName = name; break; }
-    }
-    
-    const pkmnTypes = window.Pokedex ? (window.Pokedex[pkmnName] || []) : [];
-    let pkmnData = cachedOppData[pkmnName] || {};
-    let pkmnBase = pkmnData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
-    
-    let incDanger = getDangerScore(pkmnTypes, pkmnBase, opp, oppData).score;
-    if (predictedAttack) {
-       let effect = window.getEffectiveness ? window.getEffectiveness(predictedAttack, pkmnTypes) : 1;
-       if (effect === 0) incDanger -= 1.0;
-       else if (effect < 1) incDanger -= 0.5;
-       else if (effect > 1) incDanger += 0.5;
-    }
-    incDanger += switchHazardPenalty;
+     if (btn.disabled || btn.classList.contains('disabled')) continue;
+     if (btn.textContent.includes('fainted')) continue;
+     
+     let pkmnName = btn.textContent.trim();
+     for (const name of allNames) {
+         if (pkmnName.includes(name)) { pkmnName = name; break; }
+     }
+     
+     let switchDangerScore = getDangerScore(window.Pokedex[pkmnName] || [], cachedOppData[pkmnName]?.baseStats || DEFAULT_BASE_STATS, opp, oppData, {}).score;
+     
+     let switchScore = -(switchDangerScore * 100) - (hazardState.ourHazardDmg * 100) - estimateSwitchStatusCost(btn.textContent, hazardState) * 100;
+     
+     if (switchScore > bestScore && !(hasOpponentSubstitute(opp.name) || getOpponentRecoveryTurns(opp.name) >= 3)) {
+         bestScore = switchScore;
+         bestAction = { btn, type: 'switch' };
+     }
+  }
 
-    let switchScore = -(incDanger * 100);
-    if (maxDangerScore >= 1.0 && incDanger < 0.5) switchScore += 500;
-    
-    if (switchScore > bestScore) {
-      bestScore = switchScore;
-      bestAction = { btn: btn, type: 'switch' };
-    }
-  }
-  
-  if (bestAction && bestAction.type === 'move') {
-      window.lastIntendedTarget = opp.name;
-  }
-  
+  if (bestAction?.type === 'move') window.lastIntendedTarget = opp.name;
   return bestAction || { btn: moveButtons[0] || switchButtons[0], type: moveButtons.length > 0 ? 'move' : 'switch' };
 }
 
@@ -828,120 +964,127 @@ function getHeuristicAction(moveButtons, switchButtons) {
   let amISlower = myStats.spe < oppSpeed;
   log(`Active Matchup: ${myData.name} takes estimated ${Math.round(maxDangerScore * 100)}% damage. Am I slower? ${amISlower}`);
 
+  // --- Battle-state context ---
+  const oppHasSub     = hasOpponentSubstitute(opp.name);
+  const recoveryTurns = getOpponentRecoveryTurns(opp.name);
+  const oppIsWalling  = recoveryTurns >= 3;
+  const oppIsHazardSetter = isOpponentHazardSetter(opp);
+  // Declare hazardState here so it's available in both move scoring and switch scoring
+  const hazardState = getHazardState();
+  const switchHazardPenalty = hazardState.ourHazardDmg;
+
   let bestMoveBtns = [];
   let bestMoveScore = -1;
-  let bestMoveLog = "";
+  let bestMoveLog = '';
   let bestTargetName = null;
 
   for (const btn of moveButtons) {
     const moveName = btn.getAttribute('data-move');
-    const moveData = cachedMoveData[moveName] || { basePower: 0, category: 'Status', type: 'Normal', priority: 0, accuracy: 100 };
-    
+    const moveData = cachedMoveData[moveName] || DEFAULT_MOVE_DATA;
+
     let score = 0;
     let targetForThisMove = null;
-    
+
     for (const opp of opponents) {
-        if (opp.status === 'FNT' || opp.status === 'fnt') continue;
-        let oppData = cachedOppData[opp.name] || {};
-        let oppBase = oppData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
-        
+        if (isFainted(opp.status)) continue;
+        const oppData = cachedOppData[opp.name] || {};
+        const oppBase = oppData.baseStats || { ...DEFAULT_BASE_STATS };
         const ob = opp.boosts || {};
         const oppStats = {
           hp:  estimateStat(oppBase.hp,  true,  0),
           def: estimateStat(oppBase.def, false, ob.def ?? 0),
           spd: estimateStat(oppBase.spd, false, ob.spd ?? 0),
         };
-        
+
         let moveScore = 0;
-        
+
         if (moveData.category === 'Status') {
-           // Heuristics for status moves
-           if (['Thunder Wave', 'Will-O-Wisp', 'Toxic', 'Spore', 'Sleep Powder'].includes(moveName)) {
-               if (!opp.status) {
-                   moveScore = 150; // High value for inflicting status
-                   if (moveName === 'Thunder Wave' && opp.types.includes('Ground')) moveScore = 0;
-                   if (moveName === 'Will-O-Wisp' && opp.types.includes('Fire')) moveScore = 0;
-                   if (moveName === 'Toxic' && (opp.types.includes('Poison') || opp.types.includes('Steel'))) moveScore = 0;
+           // --- Status move heuristics ---
+           const statusMoves = ['Thunder Wave', 'Will-O-Wisp', 'Toxic', 'Spore', 'Sleep Powder', 'Stun Spore', 'Poison Powder'];
+           if (statusMoves.includes(moveName)) {
+               if (opp.status) {
+                   moveScore = -2000;
                } else {
-                   moveScore = 0; // Don't use if already statused
+                   moveScore = 150;
+                   if (moveName === 'Thunder Wave' && (opp.types.includes('Ground') || opp.types.includes('Electric'))) moveScore = -2000;
+                   if (moveName === 'Will-O-Wisp' && opp.types.includes('Fire')) moveScore = -2000;
+                   if (moveName === 'Toxic' && (opp.types.includes('Poison') || opp.types.includes('Steel'))) moveScore = -2000;
+                   if (['Spore', 'Sleep Powder', 'Stun Spore', 'Poison Powder'].includes(moveName) && opp.types.includes('Grass')) moveScore = -2000;
                }
            }
-           else if (['Swords Dance', 'Dragon Dance', 'Nasty Plot', 'Calm Mind', 'Quiver Dance', 'Bulk Up'].includes(moveName)) {
-               if (maxDangerScore < 0.35) {
-                   moveScore = 200; // Very high value if safe to setup
-               } else {
-                   moveScore = 5; // Unsafe to setup
-               }
+           else if (['Swords Dance', 'Dragon Dance', 'Nasty Plot', 'Calm Mind', 'Quiver Dance', 'Bulk Up', 'Shell Smash'].includes(moveName)) {
+               // Only set up if safe; after Shell Smash commit to attacking next turn
+               moveScore = maxDangerScore < 0.35 ? 200 : 5;
            }
-           else if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis', 'Moonlight'].includes(moveName)) {
-               // Heal if we're below half HP and won't be OHKOd before we can act
-               if (myHPPercent < 0.5 && maxDangerScore < 0.8) {
-                   moveScore = 180 + (1 - myHPPercent) * 100; // More urgent the lower our HP
-               } else {
-                   moveScore = 5;
-               }
+           else if (['Roost', 'Recover', 'Soft-Boiled', 'Synthesis', 'Moonlight', 'Slack Off', 'Morning Sun'].includes(moveName)) {
+               if (myHPPercent === 1) moveScore = -2000;
+               else moveScore = (myHPPercent < 0.5 && maxDangerScore < 0.8) ? 180 + (1 - myHPPercent) * 100 : 5;
            }
            else if (['Stealth Rock', 'Spikes', 'Toxic Spikes'].includes(moveName)) {
-               // Hazards are less useful if opponent's side already has them
                moveScore = hazardState.theirSide ? 20 : 140;
            }
            else if (['Wish', 'Healing Wish', 'Lunar Dance'].includes(moveName)) {
                moveScore = myHPPercent < 0.4 ? 160 : 30;
            }
            else if (moveName === 'Trick Room') {
-               // Trick Room is valuable when we're slower than the opponent
                moveScore = amISlower ? 180 : 5;
            }
+           // Strength Sap — only useful against physical attackers; useless vs Special
+           else if (moveName === 'Strength Sap') {
+               const isPrimarilyPhysical = oppBase.atk > oppBase.spa;
+               moveScore = (isPrimarilyPhysical && maxDangerScore > 0.4) ? 160 : 5;
+           }
            else {
-               moveScore = 10; // Generic status move
+               moveScore = 10;
            }
         } else {
-           // Damage move
+           // --- Damage move heuristics ---
            let damage = calculateEstimatedDamage(myStats, oppStats, moveData, myData.types, opp.types);
+           // damage is 0 for immune matchups — treated as dead score naturally
            let percentDamage = damage / oppStats.hp;
-           
-           moveScore = percentDamage * 100; // Base score is % damage dealt
-           
-           // Priority bonus if we are slower and can KO (use actual current HP, not just 100%)
-           if (moveData.priority > 0 && percentDamage >= (opp.hp !== undefined ? opp.hp : 1.0)) {
-               moveScore += 500; // Almost definitely do this
-           }
-           
-           // If we are slower and will get OHKO'd, priority is our only hope
-           if (amISlower && maxDangerScore >= 1.0 && moveData.priority > 0) {
-               moveScore += 300;
-           }
-           
+
+           moveScore = percentDamage * 100;
+
+           // Priority bonus if slower and can KO
+           if (moveData.priority > 0 && percentDamage >= (opp.hp ?? 1.0)) moveScore += 500;
+           // Last resort: slower + OHKO threat + priority move
+           if (amISlower && maxDangerScore >= 1.0 && moveData.priority > 0) moveScore += 300;
+
            // Momentum moves
            if (['U-turn', 'Volt Switch', 'Flip Turn'].includes(moveName)) {
-               if (maxDangerScore > 0.8 && !amISlower) {
-                   moveScore += 250; // Pivot out quickly before we get hit
-               } else if (maxDangerScore < 0.5) {
-                   moveScore += 40; // Good for maintaining momentum
-               }
+               if (maxDangerScore > 0.8 && !amISlower) moveScore += 250;
+               else if (maxDangerScore < 0.5) moveScore += 40;
            }
-           
+
            // Accuracy penalty
-           let acc = moveData.accuracy;
-           if (acc === true) acc = 100; // Swift, etc.
+           const acc = moveData.accuracy === true ? 100 : (moveData.accuracy ?? 100);
            moveScore *= (acc / 100);
-           
-           // Common Immunities Check
-           let abilities = oppData.abilities || {};
-           let abilityValues = Object.values(abilities).join(' ').toLowerCase();
-           if (moveData.type === 'Ground' && abilityValues.includes('levitate')) moveScore = 0;
-           if (moveData.type === 'Fire' && abilityValues.includes('flash fire')) moveScore = 0;
-           if (moveData.type === 'Water' && (abilityValues.includes('water absorb') || abilityValues.includes('storm drain') || abilityValues.includes('dry skin'))) moveScore = 0;
-           if (moveData.type === 'Electric' && (abilityValues.includes('volt absorb') || abilityValues.includes('motor drive') || abilityValues.includes('lightning rod'))) moveScore = 0;
-           if (moveData.type === 'Grass' && abilityValues.includes('sap sipper')) moveScore = 0;
+
+           // When opponent has a Substitute, push through it — don't switch
+           if (oppHasSub) moveScore += 50;
+
+           // Opponent is stalling with recovery — escalate aggression
+           if (oppIsWalling) moveScore += 80;
+
+           // Wipe out hazard setter before they set more
+           if (oppIsHazardSetter) moveScore += 120;
+
+           // Common ability immunities
+           const abilities = oppData.abilities || {};
+           const abilityValues = Object.values(abilities).join(' ').toLowerCase();
+           if (moveData.type === 'Ground'    && abilityValues.includes('levitate'))    moveScore = 0;
+           if (moveData.type === 'Fire'      && abilityValues.includes('flash fire'))  moveScore = 0;
+           if (moveData.type === 'Water'     && (abilityValues.includes('water absorb') || abilityValues.includes('storm drain') || abilityValues.includes('dry skin'))) moveScore = 0;
+           if (moveData.type === 'Electric'  && (abilityValues.includes('volt absorb') || abilityValues.includes('motor drive') || abilityValues.includes('lightning rod'))) moveScore = 0;
+           if (moveData.type === 'Grass'     && abilityValues.includes('sap sipper')) moveScore = 0;
         }
-        
+
         if (moveScore > score) {
             score = moveScore;
             targetForThisMove = opp.name;
         }
     }
-    
+
     if (score > bestMoveScore) {
       bestMoveScore = score;
       bestMoveBtns = [btn];
@@ -954,56 +1097,52 @@ function getHeuristicAction(moveButtons, switchButtons) {
   
   let bestMoveBtn = bestMoveBtns.length > 0 ? randomChoice(bestMoveBtns) : null;
 
-  // Evaluate Switches
+  // Evaluate Switches — suppress when opponent has Substitute or is recovery-walling
   let bestSwitchBtns = [];
   let bestSwitchDanger = 999;
-  
-  const hazardState = getHazardState();
-  const switchHazardPenalty = hazardState.ourHazardDmg;
-  
-  if (moveButtons.length === 0 || (maxDangerScore >= 1.0 && amISlower)) { // If about to be OHKO'd before we can move
+
+  // hazardState and switchHazardPenalty already declared above (before move scoring)
+  // Never switch into a Substitute wall or a recovery loop — attack through it instead
+  const dontSwitch = oppHasSub || oppIsWalling;
+
+  if (!dontSwitch && (moveButtons.length === 0 || (maxDangerScore >= 1.0 && amISlower))) {
     log(`Danger score ${Math.round(maxDangerScore*100)}%, moves=${moveButtons.length}. Evaluating switches...`);
     const allNames = window.Pokedex ? Object.keys(window.Pokedex).sort((a, b) => b.length - a.length) : [];
-    
+
     for (const btn of switchButtons) {
       if (btn.disabled || btn.classList.contains('disabled')) continue;
       if (btn.textContent.includes('fainted')) continue;
-      
+
       let pkmnName = btn.textContent.trim();
       for (const name of allNames) {
-        if (pkmnName.includes(name)) {
-          pkmnName = name;
-          break;
-        }
+        if (pkmnName.includes(name)) { pkmnName = name; break; }
       }
-      
+
       const pkmnTypes = window.Pokedex ? (window.Pokedex[pkmnName] || []) : [];
-      let pkmnData = cachedOppData[pkmnName] || {};
-      let pkmnBase = pkmnData.baseStats || {hp:100, atk:100, def:100, spa:100, spd:100, spe:100};
-      
+      const pkmnData = cachedOppData[pkmnName] || {};
+      const pkmnBase = pkmnData.baseStats || { ...DEFAULT_BASE_STATS };
+
       let incomingDanger = 0;
       if (pkmnTypes.length > 0 && opponents.length > 0) {
         for (const opp of opponents) {
-            if (opp.status === 'FNT' || opp.status === 'fnt') continue;
-            let oppData = cachedOppData[opp.name] || {};
-            // Simulate danger for the incoming pokemon
-            let dangerResult = getDangerScore(pkmnTypes, pkmnBase, opp, oppData);
-            let danger = dangerResult.score;
-            
-            // Analyze the opponent for their next attack!
-            // If they are likely targeting our current weakness, try to catch it with an immunity/resistance!
-            if (predictedAttack) {
-                let effectOnSwitch = window.getEffectiveness ? window.getEffectiveness(predictedAttack, pkmnTypes) : 1;
-                if (effectOnSwitch === 0) danger -= 1.0;      // Huge bonus for immunity
-                else if (effectOnSwitch < 1) danger -= 0.5; // Bonus for resistance
-                else if (effectOnSwitch > 1) danger += 0.5; // Penalty for weakness to predicted attack
-            }
-            
-            if (danger > incomingDanger) incomingDanger = danger;
+          if (isFainted(opp.status)) continue;
+          const oppData = cachedOppData[opp.name] || {};
+          let danger = getDangerScore(pkmnTypes, pkmnBase, opp, oppData).score;
+
+          if (predictedAttack) {
+            const effectOnSwitch = window.getEffectiveness ? window.getEffectiveness(predictedAttack, pkmnTypes) : 1;
+            if (effectOnSwitch === 0) danger -= 1.0;
+            else if (effectOnSwitch < 1) danger -= 0.5;
+            else if (effectOnSwitch > 1) danger += 0.5;
+          }
+
+          if (danger > incomingDanger) incomingDanger = danger;
         }
       }
+      // Penalise switching in a poisoned/burned Pokémon — they take recurring chip every turn
+      incomingDanger += estimateSwitchStatusCost(btn.textContent, hazardState);
       incomingDanger += switchHazardPenalty;
-      
+
       if (incomingDanger < bestSwitchDanger) {
         bestSwitchDanger = incomingDanger;
         bestSwitchBtns = [btn];
